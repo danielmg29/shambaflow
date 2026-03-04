@@ -1,0 +1,80 @@
+# ══════════════════════════════════════════════
+#  ShambaFlow — .gitignore
+# ══════════════════════════════════════════════
+
+# ── Environment Variables (NEVER commit these) ──
+.env
+.env.local
+.env.development
+.env.production
+.env.*.local
+backend/.env
+frontend/.env.local
+
+# ── Python / Django ────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.Python
+venv/
+env/
+.venv/
+*.egg-info/
+dist/
+build/
+*.egg
+MANIFEST
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+backend/media/
+backend/staticfiles/
+backend/static_root/
+backend/logs/
+
+# ── Node.js / Next.js ──────────────────────────
+node_modules/
+.next/
+out/
+.vercel/
+.turbo/
+*.tsbuildinfo
+next-env.d.ts
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── IDEs ───────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ─────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Docker ─────────────────────────────────────
+docker-compose.override.yml
+
+# ── Secrets & Certificates ─────────────────────
+*.pem
+*.key
+*.cert
+*.crt
+secrets/
+credentials/
+
+# ── Temp ───────────────────────────────────────
+tmp/
+temp/
+*.tmp
+*.bak
+*.backup
