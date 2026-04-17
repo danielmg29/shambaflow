@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * CRM Profile Page — Cooperative Chair
+ * CRM Profile Page — Cooperative Team
  *
  * Sections:
  * 1. Personal info (name, email, phone, bio, title, region)
@@ -14,14 +14,14 @@
  * All edits go to PATCH /api/auth/me/ via the authApi.
  */
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useParams } from "next/navigation";
 import {
-  User, Mail, Phone, MapPin, Briefcase, FileText,
+  User, Mail, Phone, MapPin, Briefcase,
   Bell, Shield, Camera, Loader2, CheckCircle, AlertCircle,
-  Eye, EyeOff, ChevronRight, Building2, Calendar,
+  Eye, EyeOff, Building2,
 } from "lucide-react";
-import { authApi, apiFetch, getUser } from "@/lib/api";
+import { authApi, saveUser } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { AnimatedAlert } from "@/components/ui/animated-alert";
 
@@ -30,8 +30,12 @@ import { AnimatedAlert } from "@/components/ui/animated-alert";
 interface UserProfile {
   id:               string;
   email:            string;
+  first_name:       string;
+  last_name:        string;
   full_name:        string;
+  phone_number:     string;
   user_type:        string;
+  helper_role?:     string | null;
   is_email_verified:boolean;
   is_phone_verified:boolean;
   profile?: {
@@ -50,12 +54,32 @@ interface UserProfile {
     profile_photo?:       string | null;
   };
   cooperative?: {
+    id?:                string;
     name:               string;
     registration_number:string;
     cooperative_type:   string;
     region:             string;
     is_verified:        boolean;
   };
+}
+
+function formatRoleLabel(role?: string | null) {
+  if (!role) return "";
+  return role
+    .toLowerCase()
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function getSystemRoleTitle(profile: UserProfile | null) {
+  if (!profile) return "Team Member";
+  if (profile.user_type === "CHAIR") return "Cooperative Chair";
+  if (profile.user_type === "HELPER") {
+    return formatRoleLabel(profile.helper_role) || "Cooperative Helper";
+  }
+  if (profile.user_type === "BUYER") return "Buyer";
+  return "Team Member";
 }
 
 /* ─── Helper: Field Input ─────────────────────────────────────────── */
@@ -173,8 +197,6 @@ export default function CRMProfilePage() {
   // Personal info fields
   const [firstName,  setFirstName]  = useState("");
   const [lastName,   setLastName]   = useState("");
-  const [phone,      setPhone]      = useState("");
-  const [title,      setTitle]      = useState("");
   const [bio,        setBio]        = useState("");
   const [region,     setRegion]     = useState("");
   const [altPhone,   setAltPhone]   = useState("");
@@ -191,28 +213,34 @@ export default function CRMProfilePage() {
   const [showPwd,    setShowPwd]    = useState(false);
   const [pwdLoading, setPwdLoading] = useState(false);
   const [pwdError,   setPwdError]   = useState<string | null>(null);
+  const [photoUploading, setPhotoUploading] = useState(false);
+  const photoInputRef = useRef<HTMLInputElement>(null);
+
+  const applyProfileData = useCallback((data: UserProfile) => {
+    setProfile(data);
+    const [fn, ...rest] = (data.full_name ?? "").split(" ");
+    setFirstName(data.first_name ?? fn ?? "");
+    setLastName(data.last_name ?? rest.join(" ") ?? "");
+    setBio(data.profile?.bio ?? "");
+    setRegion(data.profile?.region?.trim() || data.cooperative?.region || "");
+    setAltPhone(data.profile?.alt_phone ?? "");
+    setEmailNotifs(data.profile?.email_notifications ?? true);
+    setSmsNotifs(data.profile?.sms_notifications ?? true);
+    setTenderAlerts(data.profile?.tender_alerts ?? true);
+  }, []);
+
+  const loadProfile = useCallback(async () => {
+    const data = await authApi.me() as UserProfile;
+    saveUser(data);
+    applyProfileData(data);
+  }, [applyProfileData]);
 
   // Load profile
   useEffect(() => {
-    authApi.me()
-      .then((data) => {
-        const d = data as UserProfile;
-        setProfile(d);
-        const [fn, ...rest] = (d.full_name ?? "").split(" ");
-        setFirstName(fn ?? "");
-        setLastName(rest.join(" ") ?? "");
-        setPhone(""); // phone is usually not in the JWT user
-        setTitle(d.profile?.title ?? "");
-        setBio(d.profile?.bio ?? "");
-        setRegion(d.profile?.region ?? "");
-        setAltPhone(d.profile?.alt_phone ?? "");
-        setEmailNotifs(d.profile?.email_notifications ?? true);
-        setSmsNotifs(d.profile?.sms_notifications ?? true);
-        setTenderAlerts(d.profile?.tender_alerts ?? true);
-      })
+    loadProfile()
       .catch(console.error)
       .finally(() => setLoading(false));
-  }, []);
+  }, [loadProfile]);
 
   // Save personal info
   const handleSaveProfile = useCallback(async () => {
@@ -221,18 +249,18 @@ export default function CRMProfilePage() {
       await authApi.updateMe({
         first_name: firstName.trim(),
         last_name:  lastName.trim(),
-        title:      title.trim(),
         bio:        bio.trim(),
         region:     region.trim(),
         alt_phone:  altPhone.trim(),
       });
+      await loadProfile();
       setToast({ message: "Profile updated successfully.", type: "success" });
     } catch {
       setToast({ message: "Failed to update profile. Please try again.", type: "error" });
     } finally {
       setSaving(false);
     }
-  }, [firstName, lastName, title, bio, region, altPhone]);
+  }, [firstName, lastName, bio, region, altPhone, loadProfile]);
 
   // Save notification prefs
   const handleSaveNotifs = useCallback(async () => {
@@ -243,13 +271,34 @@ export default function CRMProfilePage() {
         sms_notifications:   smsNotifs,
         tender_alerts:       tenderAlerts,
       });
+      await loadProfile();
       setToast({ message: "Notification preferences saved.", type: "success" });
     } catch {
       setToast({ message: "Failed to save preferences.", type: "error" });
     } finally {
       setSaving(false);
     }
-  }, [emailNotifs, smsNotifs, tenderAlerts]);
+  }, [emailNotifs, smsNotifs, tenderAlerts, loadProfile]);
+
+  const handlePhotoUpload = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const formData = new FormData();
+    formData.append("profile_photo", file);
+
+    setPhotoUploading(true);
+    try {
+      await authApi.updateMe(formData);
+      await loadProfile();
+      setToast({ message: "Profile photo updated successfully.", type: "success" });
+    } catch {
+      setToast({ message: "Failed to upload profile photo.", type: "error" });
+    } finally {
+      setPhotoUploading(false);
+      event.target.value = "";
+    }
+  }, [loadProfile]);
 
   // Change password
   const handleChangePassword = useCallback(async (e: React.FormEvent) => {
@@ -290,6 +339,7 @@ export default function CRMProfilePage() {
   }
 
   const initials = `${firstName.charAt(0)}${lastName.charAt(0)}`.toUpperCase() || "U";
+  const roleTitle = getSystemRoleTitle(profile);
 
   return (
     <div className="max-w-3xl space-y-6">
@@ -306,6 +356,13 @@ export default function CRMProfilePage() {
         <div className="flex flex-col sm:flex-row items-center sm:items-start gap-5">
           {/* Avatar */}
           <div className="relative group shrink-0">
+            <input
+              ref={photoInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={handlePhotoUpload}
+            />
             <div
               className="w-20 h-20 rounded-2xl bg-[var(--primary)] text-white
                          flex items-center justify-center text-2xl font-bold
@@ -323,12 +380,15 @@ export default function CRMProfilePage() {
               )}
             </div>
             <button
+              type="button"
+              onClick={() => photoInputRef.current?.click()}
+              disabled={photoUploading}
               className="absolute inset-0 rounded-2xl bg-black/40 text-white
                          flex items-center justify-center opacity-0 group-hover:opacity-100
-                         transition-opacity cursor-pointer"
+                         transition-opacity cursor-pointer disabled:cursor-not-allowed"
               title="Change photo"
             >
-              <Camera className="w-5 h-5" />
+              {photoUploading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Camera className="w-5 h-5" />}
             </button>
           </div>
 
@@ -339,7 +399,7 @@ export default function CRMProfilePage() {
             </h3>
             <p className="text-sm text-[var(--foreground-muted)] mt-0.5 flex items-center justify-center sm:justify-start gap-1.5">
               <Briefcase className="w-3.5 h-3.5" />
-              {title || "Cooperative Chair"} · {profile?.cooperative?.name}
+              {roleTitle} · {profile?.cooperative?.name}
             </p>
             <p className="text-sm text-[var(--foreground-muted)] mt-1 flex items-center justify-center sm:justify-start gap-1.5">
               <Mail className="w-3.5 h-3.5" />
@@ -376,7 +436,14 @@ export default function CRMProfilePage() {
             icon={Mail}
           />
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <FormField label="Role / Title" id="title" value={title} onChange={setTitle} placeholder="Cooperative Chair" icon={Briefcase} />
+            <FormField
+              label="Role / Title"
+              id="title"
+              value={roleTitle}
+              disabled
+              hint="This is set automatically from your account role."
+              icon={Briefcase}
+            />
             <FormField label="Region" id="region" value={region} onChange={setRegion} placeholder="e.g. Nyandarua County" icon={MapPin} />
           </div>
           <FormField label="Alternate Phone" id="altPhone" value={altPhone} onChange={setAltPhone} placeholder="+254712345678" type="tel" icon={Phone} />

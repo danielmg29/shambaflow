@@ -12,13 +12,23 @@
  * Route protection: redirects to /login if no access token.
  */
 
-import { useState, useEffect } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { usePathname, useParams, useRouter } from "next/navigation";
 import { AnimatePresence, motion } from "framer-motion";
-import { ShambaSidebar } from "@/components/shambaflow/ShambaSidebar";
+import { ShambaSidebar, type SidebarItem } from "@/components/shambaflow/ShambaSidebar";
 import { TopBar } from "@/components/dashboard/TopBar";
-import { getAccessToken, getUser } from "@/lib/api";
+import { authApi, getAccessToken, getUser, hasPermission, saveUser, type UserSnapshot } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import {
+  ClipboardList,
+  Heart,
+  LayoutDashboard,
+  Settings,
+  Users,
+  Wallet,
+  Gavel,
+  Leaf,
+} from "lucide-react";
 
 export default function CRMLayout({ children }: { children: React.ReactNode }) {
   const pathname     = usePathname();
@@ -28,18 +38,28 @@ export default function CRMLayout({ children }: { children: React.ReactNode }) {
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [mounted,     setMounted]     = useState(false);
+  const [userContext, setUserContext] = useState<UserSnapshot | null>(null);
 
   // Auth guard
   useEffect(() => {
     const token = getAccessToken();
-    const user  = getUser() as Record<string, string> | null;
+    const user  = getUser();
     if (!token) {
       router.replace("/login");
       return;
     }
     if (user?.user_type === "BUYER") {
       router.replace("/marketplace/dashboard");
+      return;
     }
+    setUserContext(user);
+    authApi.me()
+      .then((snapshot) => {
+        const nextUser = snapshot as UserSnapshot;
+        saveUser(nextUser);
+        setUserContext(nextUser);
+      })
+      .catch(() => {});
     setMounted(true);
   }, [router]);
 
@@ -53,30 +73,51 @@ export default function CRMLayout({ children }: { children: React.ReactNode }) {
     if (pathname.includes("/livestock"))    return "livestock";
     if (pathname.includes("/governance"))   return "governance";
     if (pathname.includes("/finance"))      return "finance";
-    if (pathname.includes("/forms"))        return "forms";
-    if (pathname.includes("/analytics"))    return "analytics";
+    if (pathname.includes("/form-builder")) return "form-builder";
     if (pathname.includes("/certification")) return "certification";
     if (pathname.includes("/settings"))     return "settings";
     return "dashboard";
   })();
 
-  const user = mounted ? (getUser() as Record<string, string> | null) : null;
+  const user = mounted ? userContext : null;
   const coopName = user?.cooperative_name ?? "Your Cooperative";
 
-  if (!mounted) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-[var(--background)]">
-        <div className="w-8 h-8 rounded-full border-2 border-[var(--primary)] border-t-transparent animate-spin" />
-      </div>
-    );
-  }
+  const crmItems = useMemo<SidebarItem[]>(() => {
+    const items: SidebarItem[] = [
+      { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, href: "/crm/dashboard" },
+      { id: "members", label: "Members", icon: Users, href: "/crm/members" },
+      { id: "production", label: "Production", icon: Leaf, href: "/crm/production" },
+      { id: "livestock", label: "Livestock", icon: Heart, href: "/crm/livestock" },
+      { id: "governance", label: "Governance", icon: Gavel, href: "/crm/governance" },
+      { id: "finance", label: "Finance", icon: Wallet, href: "/crm/finance" },
+      { id: "form-builder", label: "Form Builder", icon: ClipboardList, href: "/crm/form-builder" },
+    ];
+
+    if (!user || user.user_type === "CHAIR") {
+      items.push({ id: "settings", label: "Settings", icon: Settings, href: "/crm/settings" });
+      return items;
+    }
+
+    return items
+      .filter((item) => {
+        if (item.id === "dashboard") return true;
+        if (item.id === "members") return hasPermission("MEMBERS", "can_view", user);
+        if (item.id === "production") return hasPermission("PRODUCTION", "can_view", user);
+        if (item.id === "livestock") return hasPermission("LIVESTOCK", "can_view", user);
+        if (item.id === "governance") return hasPermission("GOVERNANCE", "can_view", user);
+        if (item.id === "finance") return hasPermission("FINANCE", "can_view", user);
+        if (item.id === "form-builder") return hasPermission("FORM_BUILDER", "can_view", user);
+        return false;
+      });
+  }, [user]);
 
   return (
     <div className="flex h-screen overflow-hidden bg-[var(--background)]">
       {/* ── Desktop Sidebar ──────────────────────────────────── */}
-      <div className="hidden lg:flex lg:flex-shrink-0">
+      <div className="relative z-30 hidden overflow-visible lg:flex lg:flex-shrink-0">
         <ShambaSidebar
           variant="crm"
+          items={crmItems}
           activeId={activeId}
           cooperativeName={coopName}
           onNavigate={(id, href) => {
@@ -111,6 +152,7 @@ export default function CRMLayout({ children }: { children: React.ReactNode }) {
             >
               <ShambaSidebar
                 variant="crm"
+                items={crmItems}
                 activeId={activeId}
                 cooperativeName={coopName}
                 isOpen={sidebarOpen}
@@ -129,7 +171,7 @@ export default function CRMLayout({ children }: { children: React.ReactNode }) {
       </AnimatePresence>
 
       {/* ── Main content area ────────────────────────────────── */}
-      <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
+      <div className="relative z-0 flex min-w-0 flex-1 flex-col overflow-hidden">
         {/* Topbar */}
         <TopBar
           onMenuClick={() => setSidebarOpen(true)}

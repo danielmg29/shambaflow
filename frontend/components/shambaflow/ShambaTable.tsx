@@ -14,7 +14,7 @@
  * Adaptive Convergence: columns and cell renderers are schema-driven.
  */
 
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, type ReactNode } from "react";
 import { motion } from "framer-motion";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -70,6 +70,7 @@ export interface ShambaTableProps<T = any> {
   emptyMessage?:       string;
   className?:          string;
   exportFileName?:     string;
+  toolbarActions?:     ReactNode;
 }
 
 /* ─── Helpers ─────────────────────────────────────────────────────── */
@@ -121,7 +122,7 @@ function parseCsv(text: string): Record<string, string>[] {
 
 /* ─── Component ────────────────────────────────────────────────────── */
 
-export function ShambaTable({
+export function ShambaTable<T = any>({
   variant           = "default",
   columns,
   data,
@@ -139,7 +140,8 @@ export function ShambaTable({
   emptyMessage      = "No records found.",
   className,
   exportFileName    = "shambaflow-export",
-}: ShambaTableProps) {
+  toolbarActions,
+}: ShambaTableProps<T>) {
   const [search,  setSearch]  = useState("");
   const [sortKey, setSortKey] = useState<string | null>(null);
   const [sortDir, setSortDir] = useState<SortDirection>(null);
@@ -225,7 +227,7 @@ export function ShambaTable({
           )}
         </div>
 
-        {/* Right — Import + Export */}
+        {/* Right — Import + custom actions + Export */}
         <div className="flex items-center gap-2">
 
           {/* Hidden file inputs */}
@@ -260,6 +262,8 @@ export function ShambaTable({
               </DropdownMenuContent>
             </DropdownMenu>
           )}
+
+          {toolbarActions}
 
           {/* Export */}
           <DropdownMenu>

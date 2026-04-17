@@ -70,9 +70,11 @@ Key design decisions (v2 changes):
 """
 
 import uuid
+from django.conf import settings
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.db import models
 from django.core.validators import MinValueValidator, MaxValueValidator, RegexValidator
+from django.core.exceptions import ValidationError
 from django_ckeditor_5.fields import CKEditor5Field
 
 
@@ -90,15 +92,17 @@ class TimeStampedModel(models.Model):
 
 
 class UUIDModel(models.Model):
-    """Replaces the default integer PK with a UUID."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
     class Meta:
         abstract = True
 
 
-class BaseModel(UUIDModel, TimeStampedModel):
-    """UUID PK + timestamps — base for almost all ShambaFlow models."""
+class BaseModel(UUIDModel):
+    """UUID PK + audit timestamps — base for all CRM models."""
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
     class Meta:
         abstract = True
 
@@ -403,6 +407,14 @@ class User(AbstractUser, UUIDModel):
     reset_password_token         = models.CharField(max_length=128, blank=True)
     reset_password_token_expires = models.DateTimeField(null=True, blank=True)
 
+    # 2FA fields
+    two_fa_enabled = models.BooleanField(default=False)
+    two_fa_secret = models.CharField(max_length=64, blank=True, default="")
+    pending_2fa_secret = models.CharField(max_length=64, blank=True, default="")
+
+    # Invitation / onboarding
+    must_reset_password = models.BooleanField(default=False)
+
     # ── First-login gate for helpers ──────────────────────────
     must_change_password = models.BooleanField(
         default=False,
@@ -468,15 +480,13 @@ class User(AbstractUser, UUIDModel):
         Check whether this user may perform `action` on `module`
         within their cooperative.
 
-        Resolution chain (highest priority first):
-          1. CHAIR → always True (root authority, no table lookup needed).
-          2. HELPER:
-               a. Check HelperPermissionOverride for this specific user.
-                  If a record exists → use its is_granted value (True or False).
-               b. Fall back to RolePermission for this user's role within
-                  this cooperative. If a record exists → use its is_granted.
-               c. If no record found anywhere → default False (deny).
-          3. BUYER / PLATFORM → always False for cooperative modules.
+        The live permission model in this codebase is user-specific:
+          - CHAIR users have full access within their cooperative.
+          - HELPER users read their grants from RolePermission(user, cooperative, module).
+          - BUYER / PLATFORM users never receive cooperative CRM access.
+
+        `action` may be passed as either "view" / "create" / "edit" / "delete"
+        or the explicit model field name such as "can_view".
         """
         if self.is_chair:
             return True
@@ -484,26 +494,15 @@ class User(AbstractUser, UUIDModel):
         if not self.is_helper or not self.cooperative_id:
             return False
 
-        # Per-user override (highest specificity)
-        try:
-            override = HelperPermissionOverride.objects.get(
-                user=self,
-                module=module,
-                action=action,
-            )
-            return override.is_granted
-        except HelperPermissionOverride.DoesNotExist:
-            pass
+        normalized_action = action if action.startswith("can_") else f"can_{action}"
 
-        # Role-wide permission (fallback)
         try:
             role_perm = RolePermission.objects.get(
+                user=self,
                 cooperative_id=self.cooperative_id,
-                role=self.helper_role,
                 module=module,
-                action=action,
             )
-            return role_perm.is_granted
+            return bool(getattr(role_perm, normalized_action, False))
         except RolePermission.DoesNotExist:
             return False  # Deny by default
 
@@ -761,6 +760,11 @@ class Cooperative(BaseModel):
         default=SubscriptionTier.FREE,
     )
     subscription_expires_at = models.DateTimeField(null=True, blank=True)
+    county = models.CharField(max_length=100, blank=True, default="")
+    description = models.TextField(blank=True, default="")
+    website = models.URLField(blank=True, default="")
+    physical_address = models.CharField(max_length=255, blank=True, default="")
+    updated_at = models.DateTimeField(auto_now=True)
 
     # ── Denormalised counts ────────────────────────────────────
     founded_year  = models.PositiveIntegerField(null=True, blank=True)
@@ -818,176 +822,6 @@ class CooperativeDocument(BaseModel):
         return f"{self.cooperative.name} — {self.get_document_type_display()}"
 
 
-# ── PERMISSION SYSTEM ─────────────────────────────────────────────
-
-class RolePermission(BaseModel):
-    """
-    Role-wide permission matrix set by the Cooperative Chair.
-
-    Grants or denies a (module, action) pair for an ENTIRE helper role
-    within one cooperative. For example:
-      CLERK → MEMBERS:VIEW   = True
-      CLERK → MEMBERS:DELETE = False
-
-    The Chair's own access bypasses this table (always permitted).
-    Individual exceptions are handled by HelperPermissionOverride.
-    """
-
-    class Module(models.TextChoices):
-        MEMBERS      = "MEMBERS",      "Member Management"
-        PRODUCTION   = "PRODUCTION",   "Production Records"
-        LIVESTOCK    = "LIVESTOCK",    "Livestock Records"
-        GOVERNANCE   = "GOVERNANCE",   "Governance"
-        FINANCE      = "FINANCE",      "Financial Records"
-        FORM_BUILDER = "FORM_BUILDER", "Form Builder"
-        MARKETPLACE  = "MARKETPLACE",  "Marketplace / Tenders"
-        ANALYTICS    = "ANALYTICS",    "Analytics & Reports"
-
-    class Action(models.TextChoices):
-        VIEW   = "VIEW",   "View"
-        CREATE = "CREATE", "Create"
-        EDIT   = "EDIT",   "Edit"
-        DELETE = "DELETE", "Delete"
-        EXPORT = "EXPORT", "Export"
-
-    cooperative = models.ForeignKey(
-        Cooperative, on_delete=models.CASCADE, related_name="role_permissions"
-    )
-    role        = models.CharField(max_length=25, choices=User.HelperRole.choices)
-    module      = models.CharField(max_length=20, choices=Module.choices)
-    action      = models.CharField(max_length=10, choices=Action.choices)
-    is_granted  = models.BooleanField(default=False)
-
-    class Meta:
-        db_table            = "sf_role_permissions"
-        unique_together     = ("cooperative", "role", "module", "action")
-        verbose_name        = "Role Permission"
-        verbose_name_plural = "Role Permissions"
-
-    def __str__(self):
-        status = "GRANT" if self.is_granted else "DENY"
-        return (
-            f"[{status}] {self.cooperative.name} / "
-            f"{self.role} → {self.module}:{self.action}"
-        )
-
-
-class HelperPermissionOverride(BaseModel):
-    """
-    Per-user permission exception set by the Chair for a specific helper.
-
-    Overrides RolePermission for that individual (see User.has_cooperative_permission).
-    Use cases:
-      • Give a specific Clerk EXPORT access even though the CLERK role does not.
-      • Block a specific Manager from DELETING governance records.
-
-    Only applicable to HELPER users.
-    The Chair cannot be overridden (they always have full access).
-    """
-    user = models.ForeignKey(
-        User,
-        on_delete=models.CASCADE,
-        related_name="permission_overrides",
-        limit_choices_to={"user_type": "HELPER"},
-    )
-    module     = models.CharField(max_length=20, choices=RolePermission.Module.choices)
-    action     = models.CharField(max_length=10, choices=RolePermission.Action.choices)
-    is_granted = models.BooleanField(
-        help_text="True = explicitly grant. False = explicitly deny, even if the role allows."
-    )
-    set_by = models.ForeignKey(
-        User,
-        on_delete=models.SET_NULL,
-        null=True,
-        related_name="overrides_set",
-        limit_choices_to={"user_type": "CHAIR"},
-        help_text="Must be the Chair of the same cooperative.",
-    )
-    reason = models.CharField(
-        max_length=300, blank=True,
-        help_text="Optional note from the Chair explaining the override."
-    )
-
-    class Meta:
-        db_table        = "sf_helper_permission_overrides"
-        unique_together = ("user", "module", "action")
-        verbose_name    = "Helper Permission Override"
-
-    def __str__(self):
-        status = "GRANT" if self.is_granted else "DENY"
-        return (
-            f"[{status}] {self.user.email} → {self.module}:{self.action} (override)"
-        )
-
-
-class CooperativeInvitation(BaseModel):
-    """
-    A pending invitation from a Chair to create a helper account.
-
-    Flow:
-      1. Chair fills in the helper's name, email, phone, and role.
-      2. System generates a secure token and temporary password.
-      3. Token is delivered via Brevo (email) + Infobip (SMS).
-      4. Helper clicks the link, accepts, and sets a new password.
-      5. ShambaFlowUserManager.create_helper() is called.
-      6. accepted_user is set; is_accepted=True.
-
-    Expires after settings.SHAMBAFLOW['INVITATION_EXPIRY_HOURS'] (72h default).
-    """
-    cooperative = models.ForeignKey(
-        Cooperative, on_delete=models.CASCADE, related_name="invitations"
-    )
-    invited_by = models.ForeignKey(
-        User,
-        on_delete=models.CASCADE,
-        related_name="sent_invitations",
-        limit_choices_to={"user_type": "CHAIR"},
-    )
-    email      = models.EmailField()
-    phone_number = models.CharField(max_length=20, blank=True)
-    first_name = models.CharField(max_length=100)
-    last_name  = models.CharField(max_length=100)
-    role       = models.CharField(max_length=25, choices=User.HelperRole.choices)
-
-    # Token sent via email/SMS — stored as SHA-256 hash
-    token = models.CharField(max_length=128, unique=True, db_index=True)
-
-    # Temporary password: bcrypt hash stored here; plain-text sent to email once
-    temporary_password_hash = models.CharField(max_length=128)
-
-    is_accepted   = models.BooleanField(default=False)
-    accepted_at   = models.DateTimeField(null=True, blank=True)
-    expires_at    = models.DateTimeField()
-    accepted_user = models.OneToOneField(
-        User,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name="from_invitation",
-    )
-
-    class Meta:
-        db_table     = "sf_invitations"
-        verbose_name = "Cooperative Invitation"
-        ordering     = ["-created_at"]
-        indexes      = [
-            models.Index(fields=["token"]),
-            models.Index(fields=["email", "cooperative"]),
-        ]
-
-    def __str__(self):
-        return f"Invite → {self.email} ({self.role}) @ {self.cooperative.name}"
-
-    @property
-    def is_expired(self) -> bool:
-        from django.utils import timezone
-        return timezone.now() > self.expires_at
-
-    @property
-    def is_usable(self) -> bool:
-        return not self.is_accepted and not self.is_expired
-
-
 # ══════════════════════════════════════════════════════════════════
 #  LAYER 2 — COOPERATIVE CRM
 # ══════════════════════════════════════════════════════════════════
@@ -1006,132 +840,408 @@ class Member(BaseModel):
         SUSPENDED = "SUSPENDED", "Suspended"
         DECEASED  = "DECEASED",  "Deceased"
 
-    class Gender(models.TextChoices):
-        MALE        = "MALE",        "Male"
-        FEMALE      = "FEMALE",      "Female"
-        OTHER       = "OTHER",       "Other"
-        UNSPECIFIED = "UNSPECIFIED", "Prefer not to say"
-
     # ── Core system fields (immutable) ─────────────────────────
-    cooperative   = models.ForeignKey(
-        Cooperative, on_delete=models.CASCADE, related_name="members"
+    cooperative = models.ForeignKey(
+        "core.Cooperative",
+        on_delete=models.CASCADE,
+        related_name="members",
     )
     member_number = models.CharField(
-        max_length=50, help_text="Cooperative-assigned member ID."
+        max_length=100,
+        unique=True,
+        editable=False,
+        help_text=(
+            "Cooperative-assigned unique member ID. "
+            "Format is determined by the cooperative (e.g. KAK-001, NK2024001). "
+            "Auto-generated on member creation."
+        ),
     )
-    first_name    = models.CharField(max_length=100)
-    last_name     = models.CharField(max_length=100)
-    date_of_birth = models.DateField(null=True, blank=True)
-    gender        = models.CharField(
-        max_length=15, choices=Gender.choices, default=Gender.UNSPECIFIED
-    )
-    national_id   = models.CharField(max_length=50, blank=True)
-    phone_number  = models.CharField(max_length=20, blank=True)
-    email         = models.EmailField(blank=True)
-    status        = models.CharField(
-        max_length=15, choices=MemberStatus.choices, default=MemberStatus.ACTIVE
-    )
-    joined_date   = models.DateField()
-
-    # ── Location (core) ───────────────────────────────────────
-    region   = models.CharField(max_length=150)
-    district = models.CharField(max_length=150, blank=True)
-    ward     = models.CharField(max_length=150, blank=True)
-    gps_lat  = models.DecimalField(
-        max_digits=9, decimal_places=6, null=True, blank=True
-    )
-    gps_lng  = models.DecimalField(
-        max_digits=9, decimal_places=6, null=True, blank=True
-    )
-
-    # ── Production identity (core — drives marketplace matching) ──
-    primary_production_type = models.CharField(
-        max_length=150,
+    extra_data = models.JSONField(
+        default=dict,
         blank=True,
-        help_text="e.g. Maize, Dairy Cattle, Coffee Beans.",
+        help_text=(
+            "All cooperative-defined field values. "
+            "Keys are DynamicFieldDefinition.field_key values for this cooperative."
+        ),
     )
-
-    photo    = models.ImageField(
-        upload_to="member_photos/%Y/", blank=True, null=True
-    )
-    notes    = models.TextField(blank=True)
     added_by = models.ForeignKey(
         "User", on_delete=models.SET_NULL, null=True, related_name="members_added"
     )
+    status = models.CharField(
+        max_length=10,
+        choices=MemberStatus.choices,
+        default=MemberStatus.INACTIVE,
+    )
+
 
     class Meta:
         db_table            = "sf_members"
         verbose_name        = "Member"
         verbose_name_plural = "Members"
         unique_together     = ("cooperative", "member_number")
-        ordering            = ["last_name", "first_name"]
+        ordering            = ["member_number"]
         indexes = [
             models.Index(fields=["cooperative", "status"]),
-            models.Index(fields=["national_id"]),
-            models.Index(fields=["phone_number"]),
+            models.Index(fields=["member_number"]),
         ]
 
     def __str__(self):
-        return f"{self.full_name} [{self.member_number}] @ {self.cooperative.name}"
+        return f"[{self.member_number}] @ {self.cooperative.name}"
+
+    def get_display_name(self) -> str:
+        """
+        Best-effort display name from extra_data.
+        Looks for common name-related keys in priority order.
+        Cooperatives that use different labels will still get a usable string.
+        """
+        ed = self.extra_data or {}
+        for key in (
+            "full_name", "jina_kamili", "name",
+            "first_name", "jina_la_kwanza",
+        ):
+            if ed.get(key):
+                last = ed.get("last_name") or ed.get("jina_la_mwisho") or ""
+                val = str(ed[key])
+                return f"{val} {last}".strip() if last and key == "first_name" else val
+        return f"Member {self.member_number}"
+
+    def save(self, *args, **kwargs):
+        """
+        Auto-generate member_number on creation.
+        Format: {COOP_CODE}-{SEQUENTIAL_NUMBER}
+        Example: KAK-001, NK2024001
+        """
+        if not self.member_number:
+            # Generate cooperative code from name/registration
+            coop_code = self.cooperative.name[:3].upper() if self.cooperative.name else "MEM"
+            
+            # Get next sequential number for this cooperative
+            last_member = Member.objects.filter(cooperative=self.cooperative).order_by('-member_number').first()
+            if last_member and last_member.member_number:
+                try:
+                    # Extract number part and increment
+                    last_num = int(last_member.member_number.split('-')[-1])
+                    next_num = last_num + 1
+                except (ValueError, IndexError):
+                    next_num = 1
+            else:
+                next_num = 1
+            
+            self.member_number = f"{coop_code}-{next_num:03d}"
+        
+        super().save(*args, **kwargs)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  SHARED ENUMS (used by FormTemplate and DynamicFieldDefinition)
+# ══════════════════════════════════════════════════════════════════
+
+class TargetModel(models.TextChoices):
+    MEMBER     = "MEMBER",      "Member"
+    PRODUCTION = "PRODUCTION",  "Production Record"
+    LIVESTOCK  = "LIVESTOCK",   "Livestock Health Log"
+    GOVERNANCE = "GOVERNANCE",  "Governance Record"
+    FINANCE    = "FINANCE",     "Financial Record"
+    LAND       = "LAND",        "Land Record"
+    HERD       = "HERD",        "Herd Record"
+
+class DisplayType(models.TextChoices):
+    """UI widget type. May differ from the underlying DB column type."""
+    TEXT         = "text",         "Single-line Text"
+    TEXTAREA     = "textarea",     "Multi-line Text"
+    NUMBER       = "number",       "Whole Number"
+    DECIMAL      = "decimal",      "Decimal Number"
+    DATE         = "date",         "Date Picker"
+    DATETIME     = "datetime",     "Date & Time Picker"
+    DROPDOWN     = "dropdown",     "Dropdown (single choice)"
+    MULTI_SELECT = "multi_select", "Multi-Select Checkboxes"
+    BOOLEAN      = "boolean",      "Yes / No Toggle"
+    FILE_UPLOAD  = "file_upload",  "File Upload"
+    IMAGE_UPLOAD = "image_upload", "Image Upload"
+    GPS          = "gps",          "GPS Coordinate Picker"
+    RICH_TEXT    = "rich_text",    "Rich Text (formatted)"
+
+class FieldTag(models.TextChoices):
+    """
+    Semantic classification that drives the Capacity Index engine.
+    CAPACITY-tagged fields with data → raises the cooperative's score.
+    """
+    CAPACITY      = "CAPACITY",      "Capacity / Production"
+    GOVERNANCE    = "GOVERNANCE",    "Governance"
+    FINANCIAL     = "FINANCIAL",     "Financial"
+    INFORMATIONAL = "INFORMATIONAL", "Informational Only"
+
+
+# ══════════════════════════════════════════════════════════════════
+#  FIELD KEY VALIDATION
+# ══════════════════════════════════════════════════════════════════
+
+import re
+
+_FIELD_KEY_RE = r"^[a-z][a-z0-9_]{0,63}$"
+
+def _field_key_validator(value: str):
+    """Validate custom field keys - lowercase snake_case starting with a letter."""
+    if not re.match(_FIELD_KEY_RE, value):
+        raise ValidationError(
+            f'"{value}" is not a valid field key. '
+            f'Use lowercase snake_case starting with a letter '
+            f'(e.g. "first_name", "harvest_weight_kg", "irrigation_method").'
+        )
+    _RESERVED_KEYS = frozenset({
+        "id", "cooperative", "cooperative_id", "created_at", "updated_at",
+        "extra_data", "member_number", "event_type", "record_type",
+        "category", "record_date",
+    })
+    if value in _RESERVED_KEYS:
+        raise ValidationError(
+            f'"{value}" is a reserved system field name and cannot be used '
+            f'as a custom field key.'
+        )
+
+
+# ══════════════════════════════════════════════════════════════════
+#  DYNAMIC FIELD DEFINITION
+# ══════════════════════════════════════════════════════════════════
+
+class DynamicFieldDefinition(models.Model):
+    """
+    Registry of cooperative-defined custom columns for a target model.
+
+    WHY THIS EXISTS
+    ───────────────
+    Django models are static. A cooperative in Kakamega may need to record
+    "Irrigation Type" on every Member; a cooperative in Nakuru may need
+    "Coffee Variety Grade".  These requirements differ per cooperative and
+    cannot be predicted at schema design time.
+
+    Instead of running ALTER TABLE for every cooperative's request, each
+    target model carries an `extra_data` JSONField.  This model is the
+    registry that tracks which keys exist in that JSON column per
+    (cooperative, target_model) pair — their labels, types, and validation
+    rules — so the Form Builder and API can render them correctly.
+
+    STORAGE MECHANIC
+    ────────────────
+    When a FormField has is_custom_field=True:
+      • maps_to_model_field   == this record's field_key
+      • The submission service writes:
+          instance.extra_data[field_key] = coerced_value
+
+    QuerySET SUPPORT
+    ────────────────
+    PostgreSQL JSONB lets you filter on custom fields without joining:
+      Member.objects.filter(extra_data__irrigation_type="Drip")
+
+    LIFECYCLE
+    ─────────
+    1. Chair adds a custom field through the Form Builder UI.
+    2. DynamicFieldDefinition is created here (via dynamic_fields service).
+    3. A corresponding FormField (is_custom_field=True) is added to the template.
+    4. On submission, values land in extra_data.
+    5. Soft-delete via is_active=False — historical data preserved.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    cooperative = models.ForeignKey(
+        "core.Cooperative",
+        on_delete=models.CASCADE,
+        related_name="dynamic_field_definitions",
+    )
+    target_model = models.CharField(
+        max_length=15,
+        choices=TargetModel.choices,
+        help_text="Which model's extra_data column this field lives in.",
+    )
+
+    # ── Identity ──────────────────────────────────────────────────
+    field_key = models.CharField(
+        max_length=100,
+        validators=[_field_key_validator],
+        help_text=(
+            "Stable snake_case key used as the JSON key in extra_data. "
+            "Cannot be changed after first submission. "
+            "Examples: 'irrigation_type', 'coffee_variety', 'hiv_cert_number'."
+        ),
+    )
+    label = models.CharField(
+        max_length=255,
+        help_text="Human-readable display label shown in forms and reports.",
+    )
+    display_type = models.CharField(
+        max_length=15,
+        choices=DisplayType.choices,
+        default=DisplayType.TEXT,
+    )
+    tag = models.CharField(
+        max_length=15,
+        choices=FieldTag.choices,
+        default=FieldTag.INFORMATIONAL,
+        help_text="Semantic tag — affects Capacity Index computation.",
+    )
+    help_text_display = models.CharField(
+        max_length=500,
+        blank=True,
+        help_text="Helper text shown below the form input.",
+    )
+    placeholder = models.CharField(max_length=255, blank=True)
+
+    # ── Choices (dropdown / multi_select) ─────────────────────────
+    options = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='["Option A", "Option B"] for dropdown / multi_select fields.',
+    )
+
+    # ── Validation ────────────────────────────────────────────────
+    validation_rules = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='{"min": 0, "max": 100} or {"max_length": 50} etc.',
+    )
+    is_required = models.BooleanField(
+        default=False,
+        help_text=(
+            "If True, submissions that leave this field blank will be rejected. "
+            "Note: this is a soft constraint enforced by the form, not the DB."
+        ),
+    )
+
+    # ── Lifecycle ─────────────────────────────────────────────────
+    is_active  = models.BooleanField(
+        default=True,
+        help_text="Soft-delete.  Inactive definitions are hidden from new forms.",
+    )
+    created_by = models.ForeignKey(
+        "core.User",
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name="created_dynamic_fields",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    # Lock once data exists — prevents key renaming after submissions
+    is_locked = models.BooleanField(
+        default=False,
+        help_text=(
+            "Set True automatically after the first FormSubmission that "
+            "uses this field.  field_key cannot be changed once locked."
+        ),
+    )
+
+    class Meta:
+        db_table        = "sf_dynamic_field_definitions"
+        verbose_name    = "Dynamic Field Definition"
+        verbose_name_plural = "Dynamic Field Definitions"
+        unique_together = ("cooperative", "target_model", "field_key")
+        ordering        = ["cooperative", "target_model", "label"]
+        indexes         = [
+            models.Index(fields=["cooperative", "target_model", "is_active"]),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.cooperative.name} | {self.target_model} | "
+            f"{self.field_key} ({self.get_display_type_display()})"
+        )
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        if self.is_locked and self._field_key_changed():
+            raise ValidationError(
+                {"field_key": "Cannot rename field_key after data has been submitted."}
+            )
+
+    def _field_key_changed(self) -> bool:
+        if not self.pk:
+            return False
+        try:
+            old = DynamicFieldDefinition.objects.get(pk=self.pk)
+            return old.field_key != self.field_key
+        except DynamicFieldDefinition.DoesNotExist:
+            return False
 
     @property
-    def full_name(self) -> str:
-        return f"{self.first_name} {self.last_name}"
+    def key_regex(self) -> str:
+        return _FIELD_KEY_RE
+
 
 
 class MemberLandRecord(BaseModel):
-    """Land parcels owned or farmed by a member — core for crop capacity scoring."""
-    member       = models.ForeignKey(
-        Member, on_delete=models.CASCADE, related_name="land_records"
+    """
+    A land parcel owned or farmed by a member.
+
+    The member FK is the structural discriminator — it establishes which
+    member this parcel belongs to.  Everything else (acreage, land tenure,
+    GPS coordinates, crop types, irrigation method) is cooperative-defined.
+    """
+    cooperative = models.ForeignKey(
+        "core.Cooperative",
+        on_delete=models.CASCADE,
+        related_name="land_records",
     )
-    parcel_name  = models.CharField(max_length=200, blank=True)
-    acreage      = models.DecimalField(
-        max_digits=8,
-        decimal_places=3,
-        validators=[MinValueValidator(0.001)],
-        help_text="Total area in acres.",
+    member = models.ForeignKey(
+        Member,
+        on_delete=models.CASCADE,
+        related_name="land_records",
+        help_text="The member who owns or farms this parcel.",
     )
-    land_tenure  = models.CharField(
-        max_length=50, blank=True, help_text="e.g. Freehold, Leasehold, Communal."
+    extra_data = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Cooperative-defined land parcel fields (acreage, crop_type, gps, etc.).",
     )
-    crop_types   = models.CharField(
-        max_length=255, blank=True, help_text="Comma-separated crop names."
-    )
-    is_irrigated = models.BooleanField(default=False)
-    gps_lat      = models.DecimalField(
-        max_digits=9, decimal_places=6, null=True, blank=True
-    )
-    gps_lng      = models.DecimalField(
-        max_digits=9, decimal_places=6, null=True, blank=True
-    )
-    notes        = models.TextField(blank=True)
 
     class Meta:
+        app_label    = "crm"
         db_table     = "sf_member_land"
-        verbose_name = "Land Record"
+        verbose_name = "Member Land Record"
+        ordering     = ["cooperative", "member"]
+        indexes      = [
+            models.Index(fields=["cooperative", "member"]),
+        ]
+
+    def __str__(self):
+        return f"Land record for {self.member} @ {self.cooperative.name}"
 
 
 class MemberHerdRecord(BaseModel):
-    """Livestock herds owned by a member — core for livestock capacity scoring."""
-    member         = models.ForeignKey(
-        Member, on_delete=models.CASCADE, related_name="herd_records"
+    """
+    A livestock herd owned by a member.
+
+    The member FK is the structural discriminator.
+    Everything else (animal_type, breed, count, etc.) is cooperative-defined.
+    """
+    cooperative = models.ForeignKey(
+        "core.Cooperative",
+        on_delete=models.CASCADE,
+        related_name="herd_records",
     )
-    animal_type    = models.CharField(
-        max_length=100, help_text="e.g. Dairy Cattle, Goats, Sheep."
+    member = models.ForeignKey(
+        Member,
+        on_delete=models.CASCADE,
+        related_name="herd_records",
+        help_text="The member who owns this herd.",
     )
-    breed          = models.CharField(max_length=100, blank=True)
-    total_count    = models.PositiveIntegerField(default=0)
-    mature_count   = models.PositiveIntegerField(default=0)
-    juvenile_count = models.PositiveIntegerField(default=0)
-    notes          = models.TextField(blank=True)
-    recorded_on    = models.DateField()
+    extra_data = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Cooperative-defined herd fields (animal_type, breed, count, etc.).",
+    )
 
     class Meta:
+        app_label    = "crm"
         db_table     = "sf_member_herds"
-        verbose_name = "Herd Record"
+        verbose_name = "Member Herd Record"
+        ordering     = ["cooperative", "member"]
+        indexes      = [
+            models.Index(fields=["cooperative", "member"]),
+        ]
 
     def __str__(self):
-        return f"{self.member.full_name} — {self.animal_type} ({self.total_count})"
+        return f"Herd record for {self.member} @ {self.cooperative.name}"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1381,12 +1491,21 @@ class FormField(BaseModel):
         ),
     )
 
-    # Auto-set by the service layer (not editable by the Chair)
+    # Auto-set by the service layer (not editable by Chair)
     is_model_required = models.BooleanField(
         default=False,
         editable=False,
         help_text=(
             "True if the underlying model field is non-nullable with no default. "
+            "Set automatically — cannot be overridden."
+        ),
+    )
+    is_custom_field = models.BooleanField(
+        default=False,
+        editable=False,
+        help_text=(
+            "True if this field maps to a custom key (stored in extra_data). "
+            "False if it maps to a real model column. "
             "Set automatically — cannot be overridden."
         ),
     )
@@ -1409,6 +1528,7 @@ class FormField(BaseModel):
     conditional_rule = models.JSONField(
         default=dict,
         blank=True,
+        null=True,
         help_text=(
             'Show/hide this field based on another field\'s value. '
             'Format: {"show_if": {"field_id": "<uuid>", "equals": "Maize"}}'
@@ -1680,61 +1800,49 @@ class ProductionRecord(BaseModel):
         GRADE_C  = "C",   "Grade C (Low)"
         UNGRADED = "UNG", "Ungraded"
 
-    cooperative    = models.ForeignKey(
-        Cooperative, on_delete=models.CASCADE, related_name="production_records"
-    )
-    member         = models.ForeignKey(
-        Member,
+    cooperative = models.ForeignKey(
+        "core.Cooperative",
         on_delete=models.CASCADE,
         related_name="production_records",
-        null=True,
+    )
+    record_date = models.DateField(
+        db_index=True,
+        help_text=(
+            "Date of this production event (harvest date, delivery date, etc.). "
+            "Required — drives time-series capacity analytics."
+        ),
+    )
+    extra_data = models.JSONField(
+        default=dict,
         blank=True,
+        help_text=(
+            "Cooperative-defined production fields "
+            "(product_name, quantity_kg, quality_grade, member, season, etc.)."
+        ),
     )
-    product_name   = models.CharField(
-        max_length=200, help_text="e.g. Maize, Milk, Coffee Beans."
-    )
-    harvest_date   = models.DateField()
-    quantity_kg    = models.DecimalField(
-        max_digits=10,
-        decimal_places=3,
-        validators=[MinValueValidator(0.001)],
-        help_text="Weight in kilograms.",
-    )
-    quality_grade  = models.CharField(
-        max_length=5, choices=QualityGrade.choices, default=QualityGrade.UNGRADED
-    )
-    unit_price_ksh = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        null=True,
-        blank=True,
-        help_text="Indicative farm-gate price in KES. No transaction is processed here.",
-    )
-    season      = models.CharField(
-        max_length=50, blank=True, help_text="e.g. Long Rains 2024."
-    )
-    notes       = models.TextField(blank=True)
-    recorded_by = models.ForeignKey("User", on_delete=models.SET_NULL, null=True)
 
     class Meta:
+        app_label    = "crm"
         db_table     = "sf_production_records"
         verbose_name = "Production Record"
-        ordering     = ["-harvest_date"]
+        ordering     = ["-record_date"]
         indexes      = [
-            models.Index(fields=["cooperative", "harvest_date"]),
-            models.Index(fields=["cooperative", "product_name"]),
-            models.Index(fields=["member", "harvest_date"]),
+            models.Index(fields=["cooperative", "record_date"]),
         ]
 
     def __str__(self):
-        return (
-            f"{self.cooperative.name} | {self.product_name} | "
-            f"{self.quantity_kg}kg | {self.harvest_date}"
-        )
+        return f"Production @ {self.cooperative.name} on {self.record_date}"
 
 
 class LivestockHealthLog(BaseModel):
-    """Veterinary events: vaccinations, treatments, births, deaths."""
+    """
+    A veterinary or livestock management event.
+
+    event_type is the discriminator — it allows the platform to filter
+    vaccinations vs deaths vs purchases without parsing free-text fields.
+    All details (animal_type, treatment_name, dosage, cost, etc.) are
+    cooperative-defined.
+    """
 
     class EventType(models.TextChoices):
         VACCINATION   = "VACCINATION",   "Vaccination"
@@ -1745,54 +1853,54 @@ class LivestockHealthLog(BaseModel):
         DEATH         = "DEATH",         "Death"
         SALE          = "SALE",          "Sale"
         PURCHASE      = "PURCHASE",      "Purchase"
+        OTHER         = "OTHER",         "Other"
 
-    cooperative      = models.ForeignKey(
-        Cooperative, on_delete=models.CASCADE, related_name="livestock_logs"
-    )
-    member           = models.ForeignKey(
-        Member,
+    cooperative = models.ForeignKey(
+        "core.Cooperative",
         on_delete=models.CASCADE,
         related_name="livestock_logs",
-        null=True,
+    )
+    event_type = models.CharField(
+        max_length=20,
+        choices=EventType.choices,
+        db_index=True,
+        help_text=(
+            "Category of this event. Required — drives vaccination coverage "
+            "and disease outbreak analytics."
+        ),
+    )
+    extra_data = models.JSONField(
+        default=dict,
         blank=True,
+        help_text=(
+            "Cooperative-defined fields "
+            "(animal_type, event_date, treatment_name, dosage, member, etc.)."
+        ),
     )
-    herd_record      = models.ForeignKey(
-        MemberHerdRecord, on_delete=models.SET_NULL, null=True, blank=True
-    )
-    event_type       = models.CharField(max_length=20, choices=EventType.choices)
-    animal_type      = models.CharField(max_length=100)
-    event_date       = models.DateField()
-    animals_affected = models.PositiveIntegerField(default=1)
-    treatment_name   = models.CharField(max_length=255, blank=True)
-    dosage           = models.CharField(max_length=100, blank=True)
-    veterinarian     = models.CharField(max_length=255, blank=True)
-    cost_ksh         = models.DecimalField(
-        max_digits=10, decimal_places=2, null=True, blank=True
-    )
-    next_due_date    = models.DateField(null=True, blank=True)
-    notes            = models.TextField(blank=True)
-    document         = models.FileField(
-        upload_to="livestock_docs/%Y/", blank=True, null=True
-    )
-    recorded_by      = models.ForeignKey("User", on_delete=models.SET_NULL, null=True)
 
     class Meta:
+        app_label    = "crm"
         db_table     = "sf_livestock_health"
         verbose_name = "Livestock Health Log"
-        ordering     = ["-event_date"]
+        ordering     = ["-created_at"]
         indexes      = [
-            models.Index(fields=["cooperative", "event_date"]),
-            models.Index(fields=["member", "event_type"]),
+            models.Index(fields=["cooperative", "event_type"]),
         ]
 
     def __str__(self):
-        return (
-            f"{self.member} | {self.get_event_type_display()} | {self.event_date}"
-        )
+        return f"{self.get_event_type_display()} @ {self.cooperative.name}"
+
 
 
 class GovernanceRecord(BaseModel):
-    """AGM minutes, resolutions, audit reports, compliance certificates."""
+    """
+    A governance document: AGM minutes, resolution, audit report, certificate.
+
+    record_type is the discriminator — it drives institutional reporting
+    (e.g. "show all audit reports for this cooperative").
+    All content fields (title, event_date, content, document, attendees, etc.)
+    are cooperative-defined.
+    """
 
     class RecordType(models.TextChoices):
         MEETING     = "MEETING",     "Meeting Minutes"
@@ -1801,45 +1909,52 @@ class GovernanceRecord(BaseModel):
         CERTIFICATE = "CERTIFICATE", "Certificate / Compliance"
         OTHER       = "OTHER",       "Other"
 
-    cooperative     = models.ForeignKey(
-        Cooperative, on_delete=models.CASCADE, related_name="governance_records"
+    cooperative = models.ForeignKey(
+        "core.Cooperative",
+        on_delete=models.CASCADE,
+        related_name="governance_records",
     )
-    record_type     = models.CharField(max_length=15, choices=RecordType.choices)
-    title           = models.CharField(max_length=300)
-    event_date      = models.DateField()
-    location        = models.CharField(max_length=255, blank=True)
-    attendees_count = models.PositiveIntegerField(null=True, blank=True)
-    quorum_met      = models.BooleanField(null=True, blank=True)
-    content         = CKEditor5Field(config_name="extended", blank=True)
-    document        = models.FileField(
-        upload_to="governance/%Y/", blank=True, null=True
+    record_type = models.CharField(
+        max_length=15,
+        choices=RecordType.choices,
+        db_index=True,
+        help_text="Category of governance record. Required for institutional reporting.",
     )
-    recorded_by     = models.ForeignKey("User", on_delete=models.SET_NULL, null=True)
-    is_ratified     = models.BooleanField(default=False)
+    extra_data = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=(
+            "Cooperative-defined governance fields "
+            "(title, event_date, location, attendees_count, content, document, etc.)."
+        ),
+    )
 
     class Meta:
+        app_label    = "crm"
         db_table     = "sf_governance"
         verbose_name = "Governance Record"
-        ordering     = ["-event_date"]
+        ordering     = ["-created_at"]
         indexes      = [
             models.Index(fields=["cooperative", "record_type"]),
-            models.Index(fields=["event_date"]),
         ]
 
     def __str__(self):
-        return (
-            f"{self.cooperative.name} | "
-            f"{self.get_record_type_display()} | {self.event_date}"
-        )
+        return f"{self.get_record_type_display()} @ {self.cooperative.name}"
 
 
 class FinancialRecord(BaseModel):
     """
-    Non-transactional financial log.
-    Records contributions, savings, revenue. No payments processed here.
+    A non-transactional financial log entry.
+
+    category is the discriminator — it allows financial aggregation
+    (e.g. total contributions, total expenditure) without parsing free-text.
+    All value fields (amount, date, member link, reference, description, etc.)
+    are cooperative-defined.
+
+    No payment processing occurs within ShambaFlow.
     """
 
-    class RecordCategory(models.TextChoices):
+    class Category(models.TextChoices):
         CONTRIBUTION = "CONTRIBUTION", "Member Contribution"
         LOAN_REPAY   = "LOAN_REPAY",   "Loan Repayment"
         SAVINGS      = "SAVINGS",      "Savings Deposit"
@@ -1848,43 +1963,37 @@ class FinancialRecord(BaseModel):
         DIVIDEND     = "DIVIDEND",     "Dividend Payout"
         OTHER        = "OTHER",        "Other"
 
-    cooperative      = models.ForeignKey(
-        Cooperative, on_delete=models.CASCADE, related_name="financial_records"
-    )
-    member           = models.ForeignKey(
-        Member,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
+    cooperative = models.ForeignKey(
+        "core.Cooperative",
+        on_delete=models.CASCADE,
         related_name="financial_records",
     )
-    category         = models.CharField(max_length=15, choices=RecordCategory.choices)
-    amount_ksh       = models.DecimalField(
-        max_digits=14,
-        decimal_places=2,
-        validators=[MinValueValidator(0)],
-        help_text="Amount in Kenyan Shillings.",
+    category = models.CharField(
+        max_length=15,
+        choices=Category.choices,
+        db_index=True,
+        help_text="Financial record category. Required for aggregation and reporting.",
     )
-    transaction_date  = models.DateField()
-    reference_number  = models.CharField(max_length=100, blank=True)
-    description       = models.TextField(blank=True)
-    recorded_by       = models.ForeignKey("User", on_delete=models.SET_NULL, null=True)
+    extra_data = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=(
+            "Cooperative-defined financial fields "
+            "(amount_ksh, transaction_date, member, reference_number, description, etc.)."
+        ),
+    )
 
     class Meta:
+        app_label    = "crm"
         db_table     = "sf_financial_records"
         verbose_name = "Financial Record"
-        ordering     = ["-transaction_date"]
+        ordering     = ["-created_at"]
         indexes      = [
             models.Index(fields=["cooperative", "category"]),
-            models.Index(fields=["cooperative", "transaction_date"]),
-            models.Index(fields=["member"]),
         ]
 
     def __str__(self):
-        return (
-            f"{self.cooperative.name} | "
-            f"{self.get_category_display()} | KES {self.amount_ksh}"
-        )
+        return f"{self.get_category_display()} @ {self.cooperative.name}"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -2312,3 +2421,137 @@ class CooperativeReputationScore(BaseModel):
 
     def __str__(self):
         return f"{self.cooperative.name} | Credibility: {self.credibility_score}/100"
+
+class NotificationPreference(models.Model):
+    """Per-user notification settings within a cooperative context."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name="notification_preferences"
+    )
+    cooperative = models.ForeignKey(
+        "Cooperative", on_delete=models.CASCADE,
+        related_name="notification_preferences"
+    )
+
+    # Email channels (via Brevo)
+    email_invitations = models.BooleanField(default=True)
+    email_tender_updates = models.BooleanField(default=True)
+    email_verification_alerts = models.BooleanField(default=True)
+    email_system_announcements = models.BooleanField(default=True)
+
+    # SMS channels (via Infobip)
+    sms_invitations = models.BooleanField(default=True)
+    sms_otp = models.BooleanField(default=True)
+    sms_tender_updates = models.BooleanField(default=True)
+    sms_critical_alerts = models.BooleanField(default=True)
+
+    class Meta:
+        unique_together = ("user", "cooperative")
+        verbose_name = "Notification Preference"
+        verbose_name_plural = "Notification Preferences"
+
+    def __str__(self):
+        return f"{self.user.email} – {self.cooperative.name}"
+
+class VerificationDocument(models.Model):
+    """Cooperative verification documents submitted for review."""
+
+    DOCUMENT_TYPES = [
+        ("REGISTRATION_CERTIFICATE", "Registration Certificate"),
+        ("TAX_COMPLIANCE", "Tax Compliance Certificate"),
+        ("AUDITED_ACCOUNTS", "Audited Accounts"),
+        ("CONSTITUTION", "Cooperative Constitution"),
+        ("MINUTES_AGM", "AGM Minutes"),
+        ("OTHER", "Other Document"),
+    ]
+
+    STATUS_CHOICES = [
+        ("PENDING", "Pending Review"),
+        ("APPROVED", "Approved"),
+        ("REJECTED", "Rejected"),
+        ("VERIFIED", "Verified"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    cooperative = models.ForeignKey(
+        "Cooperative", on_delete=models.CASCADE,
+        related_name="verification_documents"
+    )
+    document_type = models.CharField(max_length=50, choices=DOCUMENT_TYPES)
+    file = models.FileField(upload_to="verification/")
+    file_name = models.CharField(max_length=255, blank=True, default="")
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="PENDING")
+    notes = models.TextField(blank=True, default="")
+
+    class Meta:
+        ordering = ["-uploaded_at"]
+        verbose_name = "Verification Document"
+        verbose_name_plural = "Verification Documents"
+
+    def __str__(self):
+        return f"{self.cooperative.name} – {self.get_document_type_display()}"
+
+class RolePermission(models.Model):
+    """Granular module-level permissions for cooperative helper accounts."""
+
+    MODULE_CHOICES = [
+        ("MEMBERS", "Members"),
+        ("PRODUCTION", "Production"),
+        ("LIVESTOCK", "Livestock"),
+        ("GOVERNANCE", "Governance"),
+        ("FINANCE", "Finance"),
+        ("FORM_BUILDER", "Form Builder"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name="role_permissions"
+    )
+    cooperative = models.ForeignKey(
+        "Cooperative", on_delete=models.CASCADE,
+        related_name="user_role_permissions"
+    )
+    module = models.CharField(max_length=30, choices=MODULE_CHOICES)
+
+    # CRUD permissions
+    can_view = models.BooleanField(default=True)
+    can_create = models.BooleanField(default=False)
+    can_edit = models.BooleanField(default=False)
+    can_delete = models.BooleanField(default=False)
+
+    # Form template editing (separate from regular edit)
+    can_edit_templates = models.BooleanField(default=False)
+
+    class Meta:
+        unique_together = ("user", "cooperative", "module")
+        verbose_name = "Role Permission"
+        verbose_name_plural = "Role Permissions"
+
+    def __str__(self):
+        return f"{self.user.email} – {self.module} ({self.cooperative.name})"
+
+class Invitation(models.Model):
+    """Track team invitation tokens."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    cooperative = models.ForeignKey(
+        "Cooperative", on_delete=models.CASCADE, related_name="invitations"
+    )
+    email = models.EmailField()
+    role = models.CharField(max_length=30)
+    token = models.CharField(max_length=128, unique=True)
+    invited_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True,
+        related_name="sent_invitations"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    accepted = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Invitation to {self.email} ({self.cooperative.name})"

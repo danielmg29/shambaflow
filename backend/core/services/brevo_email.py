@@ -132,7 +132,7 @@ def send_cooperative_verification_email(
     )
 
 
-def send_helper_invitation_email(
+def send_invitation_email(
     to_email: str,
     invitee_name: str,
     cooperative_name: str,

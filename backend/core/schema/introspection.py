@@ -68,6 +68,10 @@ def get_field_info(field) -> Optional[Dict[str, Any]]:
     if not hasattr(field, 'column') and not field.is_relation:
         return None
 
+    # Skip fields that are not editable (e.g., auto-generated fields)
+    if not getattr(field, 'editable', True):
+        return None
+
     field_type_name = type(field).__name__
     frontend_type   = _FIELD_TYPE_MAP.get(field_type_name, 'string')
 
@@ -103,7 +107,7 @@ def get_field_info(field) -> Optional[Dict[str, Any]]:
         info['decimal_places'] = field.decimal_places
 
     # ── Default value ─────────────────────────────────────────
-    if hasattr(field, 'default') and field.default is not field.__class__.default:
+    if hasattr(field, 'default') and hasattr(field.__class__, 'default') and field.default is not field.__class__.default:
         try:
             default = field.default() if callable(field.default) else field.default
             info['default'] = str(default) if default is not None else None

@@ -70,6 +70,42 @@ class ShambaFlowTokenObtainSerializer(TokenObtainPairSerializer):
                 'Check your inbox for the verification link.'
             )
 
+        permissions_map = {}
+        cooperative_name = None
+        if user.cooperative_id:
+            cooperative_name = getattr(user.cooperative, "name", None)
+            if user.is_chair:
+                for module in ["MEMBERS", "PRODUCTION", "LIVESTOCK", "GOVERNANCE", "FINANCE", "FORM_BUILDER"]:
+                    permissions_map[module] = {
+                        "can_view": True,
+                        "can_create": True,
+                        "can_edit": True,
+                        "can_delete": True,
+                        "can_edit_templates": True,
+                    }
+            elif user.is_helper:
+                from core.models import RolePermission
+
+                perms = RolePermission.objects.filter(
+                    user=user,
+                    cooperative_id=user.cooperative_id,
+                ).values(
+                    "module",
+                    "can_view",
+                    "can_create",
+                    "can_edit",
+                    "can_delete",
+                    "can_edit_templates",
+                )
+                for perm in perms:
+                    permissions_map[perm["module"]] = {
+                        "can_view": perm["can_view"],
+                        "can_create": perm["can_create"],
+                        "can_edit": perm["can_edit"],
+                        "can_delete": perm["can_delete"],
+                        "can_edit_templates": perm["can_edit_templates"],
+                    }
+
         # Enrich response body (beyond just access/refresh tokens)
         data['user'] = {
             'id':                  str(user.id),
@@ -78,9 +114,11 @@ class ShambaFlowTokenObtainSerializer(TokenObtainPairSerializer):
             'user_type':           user.user_type,
             'must_change_password': user.must_change_password,
             'cooperative_id':      str(user.cooperative_id) if user.cooperative_id else None,
+            'cooperative_name':    cooperative_name,
             'helper_role':         user.helper_role or None,
             'is_email_verified':   user.is_email_verified,
             'is_phone_verified':   user.is_phone_verified,
+            'permissions':         permissions_map,
         }
 
         logger.info('Login success | user=%s | type=%s', user.email, user.user_type)

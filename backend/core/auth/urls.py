@@ -1,43 +1,72 @@
 """
-ShambaFlow — Auth URL Configuration
-
-Adaptive Convergence note:
-Auth is intentionally NOT handled by the dynamic CRUD catch-alls.
-These endpoints are explicit and must remain above /api/<model_name> routes.
+ShambaFlow – Auth URL Configuration
+=====================================
+All authentication endpoints. Included under /api/auth/ in root urls.py.
+MUST be placed before the dynamic catch-all in the root URL config.
 """
 
 from django.urls import path
 from rest_framework_simplejwt.views import TokenRefreshView
 
-from . import views
-
-app_name = "auth"
+from core.auth.views import (
+    register_cooperative_view,
+    register_buyer_view,
+    ShambaFlowLoginView,
+    logout_view,
+    verify_email_view,
+    resend_verification_view,
+    verify_otp_view,
+    resend_otp_view,
+    forgot_password_view,
+    reset_password_view,
+    reset_password_otp_view,
+    change_password_view,
+    me_view,
+    accept_invitation_view,
+    setup_2fa_view,
+    verify_2fa_view,
+    disable_2fa_view,
+)
 
 urlpatterns = [
-    # ── Registration ──────────────────────────────────────────────────────────
-    path("register/cooperative/", views.register_cooperative_view, name="register_cooperative"),
-    path("register/buyer/", views.register_buyer_view, name="register_buyer"),
+    # ── Registration ───────────────────────────────────────────────────────────
+    path("register/cooperative/", register_cooperative_view,  name="register-cooperative"),
+    path("register/buyer/",       register_buyer_view,         name="register-buyer"),
 
-    # ── JWT auth ──────────────────────────────────────────────────────────────
-    path("login/", views.ShambaFlowLoginView.as_view(), name="login"),
-    path("logout/", views.logout_view, name="logout"),
-    path("token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
+    # ── Login / Logout ─────────────────────────────────────────────────────────
+    path("login/",   ShambaFlowLoginView.as_view(),  name="auth-login"),
+    path("logout/",  logout_view, name="auth-logout"),
 
-    # ── Verification ──────────────────────────────────────────────────────────
-    path("verify-email/", views.verify_email_view, name="verify_email"),
-    path("resend-verification/", views.resend_verification_view, name="resend_verification"),
-    path("verify-otp/", views.verify_otp_view, name="verify_otp"),
-    path("resend-otp/", views.resend_otp_view, name="resend_otp"),
+    # ── JWT refresh ────────────────────────────────────────────────────────────
+    path("token/refresh/", TokenRefreshView.as_view(), name="token-refresh"),
 
-    # ── Password reset ────────────────────────────────────────────────────────
-    path("forgot-password/", views.forgot_password_view, name="forgot_password"),
-    path("reset-password/", views.reset_password_view, name="reset_password"),
-    path("reset-password-otp/", views.reset_password_otp_view, name="reset_password_otp"),
-    path("change-password/", views.change_password_view, name="change_password"),
+    # ── Current user context ───────────────────────────────────────────────────
+    # GET  → full user snapshot (cooperative, permissions, 2FA status, cooperative.id)
+    # PATCH → update personal info (first_name, last_name, phone_number)
+    path("me/", me_view, name="auth-me"),
 
-    # ── Invitations ───────────────────────────────────────────────────────────
-    path("accept-invitation/", views.accept_invitation_view, name="accept_invitation"),
+    # ── Email verification ─────────────────────────────────────────────────────
+    path("verify-email/",        verify_email_view,       name="verify-email"),
+    path("resend-verification/", resend_verification_view, name="resend-verification"),
 
-    # ── Current user profile ──────────────────────────────────────────────────
-    path("me/", views.me_view, name="me"),
+    # ── OTP via Infobip ────────────────────────────────────────────────────────
+    path("verify-otp/", verify_otp_view, name="verify-otp"),
+    path("resend-otp/", resend_otp_view, name="resend-otp"),
+
+    # ── Password management ────────────────────────────────────────────────────
+    path("forgot-password/",    forgot_password_view,    name="forgot-password"),
+    path("reset-password/",     reset_password_view,     name="reset-password"),
+    path("reset-password-otp/", reset_password_otp_view, name="reset-password-otp"),
+    path("change-password/",    change_password_view,    name="change-password"),
+
+    # ── Invitation acceptance ──────────────────────────────────────────────────
+    # Helper clicks email link → /accept-invitation?token=…
+    # Frontend POSTs {token, new_password, confirm_password} here.
+    # Returns JWT on success so helper enters CRM immediately.
+    path("accept-invitation/", accept_invitation_view, name="accept-invitation"),
+
+    # ── 2FA (TOTP) ─────────────────────────────────────────────────────────────
+    path("setup-2fa/",   setup_2fa_view,   name="setup-2fa"),
+    path("verify-2fa/",  verify_2fa_view,  name="verify-2fa"),
+    path("disable-2fa/", disable_2fa_view, name="disable-2fa"),
 ]

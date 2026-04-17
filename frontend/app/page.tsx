@@ -34,7 +34,14 @@ import {
   MEMBER_COLUMNS,
   TENDER_COLUMNS,
 }                                from "@/components/shambaflow/ShambaTable";
-import { ShambaFormBuilder }     from "@/components/shambaflow/ShambaFormBuilder";
+import {
+  ShambaFormBuilder,
+  type BuilderField,
+}                                from "@/components/shambaflow/ShambaFormBuilder";
+import type {
+  DynamicFieldDefinition,
+  Issue,
+}                                from "@/hooks/useFormBuilder";
 import { Users, BarChart3, TrendingUp, Package, Database } from "lucide-react";
 
 /* ── Logo asset paths ─────────────────────────────────────────────── */
@@ -98,21 +105,183 @@ const OUTCOMES = [
   { tender_title: "Tea Grade Export",      buyer_name: "Leafy Exports",  volume_kg: 3_400,  status: "partial"   as const, reliability_rating: 3, date: "Nov 2024" },
 ];
 
-const AVAILABLE_FIELDS = [
-  { field_name: "volume_kg",     verbose_name: "Volume (kg)",   django_type: "DecimalField" },
-  { field_name: "quality_grade", verbose_name: "Quality Grade", django_type: "CharField" },
-  { field_name: "harvest_date",  verbose_name: "Harvest Date",  django_type: "DateField" },
-  { field_name: "moisture_pct",  verbose_name: "Moisture %",    django_type: "DecimalField" },
-  { field_name: "notes",         verbose_name: "Notes",         django_type: "TextField" },
-  { field_name: "is_certified",  verbose_name: "GAP Certified", django_type: "BooleanField" },
+const AVAILABLE_FIELDS: DynamicFieldDefinition[] = [
+  {
+    id: "dfd_volume_kg",
+    field_key: "volume_kg",
+    label: "Volume (kg)",
+    display_type: "decimal",
+    tag: "CAPACITY",
+    is_required: true,
+    is_locked: false,
+    is_active: true,
+    help_text: "Total harvest volume recorded for this submission.",
+    placeholder: "e.g. 1200.00",
+    options: [],
+    validation_rules: { min_value: 0 },
+    created_at: "2026-04-10T00:00:00Z",
+  },
+  {
+    id: "dfd_quality_grade",
+    field_key: "quality_grade",
+    label: "Quality Grade",
+    display_type: "dropdown",
+    tag: "CAPACITY",
+    is_required: true,
+    is_locked: false,
+    is_active: true,
+    help_text: "Select the grade assigned after inspection.",
+    placeholder: "",
+    options: ["Grade A", "Grade B", "Grade C"],
+    validation_rules: {},
+    created_at: "2026-04-10T00:00:00Z",
+  },
+  {
+    id: "dfd_harvest_date",
+    field_key: "harvest_date",
+    label: "Harvest Date",
+    display_type: "date",
+    tag: "INFORMATIONAL",
+    is_required: true,
+    is_locked: false,
+    is_active: true,
+    help_text: "Date when the crop was harvested.",
+    placeholder: "",
+    options: [],
+    validation_rules: {},
+    created_at: "2026-04-10T00:00:00Z",
+  },
+  {
+    id: "dfd_moisture_pct",
+    field_key: "moisture_pct",
+    label: "Moisture %",
+    display_type: "decimal",
+    tag: "CAPACITY",
+    is_required: false,
+    is_locked: false,
+    is_active: true,
+    help_text: "Record measured moisture percentage if available.",
+    placeholder: "e.g. 12.5",
+    options: [],
+    validation_rules: { min_value: 0, max_value: 100 },
+    created_at: "2026-04-10T00:00:00Z",
+  },
+  {
+    id: "dfd_notes",
+    field_key: "notes",
+    label: "Notes",
+    display_type: "textarea",
+    tag: "INFORMATIONAL",
+    is_required: false,
+    is_locked: false,
+    is_active: true,
+    help_text: "Capture context or exceptions for this harvest log.",
+    placeholder: "Add any relevant notes",
+    options: [],
+    validation_rules: {},
+    created_at: "2026-04-10T00:00:00Z",
+  },
+  {
+    id: "dfd_is_certified",
+    field_key: "is_certified",
+    label: "GAP Certified",
+    display_type: "boolean",
+    tag: "GOVERNANCE",
+    is_required: false,
+    is_locked: false,
+    is_active: true,
+    help_text: "Whether this lot has GAP certification attached.",
+    placeholder: "",
+    options: [],
+    validation_rules: {},
+    created_at: "2026-04-10T00:00:00Z",
+  },
 ];
 
-const FORM_FIELDS = [
-  { id: "f1", label: "Harvest Volume (kg)", display_type: "decimal"  as const, tag: "CAPACITY"      as const, maps_to_model_field: "volume_kg",    is_required: true,  placeholder: "e.g. 1200.00" },
-  { id: "f2", label: "Quality Grade",       display_type: "dropdown" as const, tag: "CAPACITY"      as const, maps_to_model_field: "quality_grade", is_required: true  },
-  { id: "f3", label: "Harvest Date",        display_type: "date"     as const, tag: "INFORMATIONAL" as const, maps_to_model_field: "harvest_date",  is_required: true  },
-  { id: "f4", label: "Moisture %",          display_type: "decimal"  as const, tag: "CAPACITY"      as const, maps_to_model_field: "moisture_pct",  is_required: false },
-  { id: "f5", label: "Notes",               display_type: "textarea" as const, tag: "INFORMATIONAL" as const, maps_to_model_field: "notes",         is_required: false },
+const FORM_FIELDS: BuilderField[] = [
+  {
+    id: "f1",
+    dfd_id: "dfd_volume_kg",
+    field_key: "volume_kg",
+    label: "Volume (kg)",
+    display_type: "decimal",
+    tag: "CAPACITY",
+    is_system: false,
+    is_locked: false,
+    is_required: true,
+    placeholder: "e.g. 1200.00",
+    help_text: "Total harvest volume recorded for this submission.",
+    validation_rules: { min_value: 0 },
+  },
+  {
+    id: "f2",
+    dfd_id: "dfd_quality_grade",
+    field_key: "quality_grade",
+    label: "Quality Grade",
+    display_type: "dropdown",
+    tag: "CAPACITY",
+    is_system: false,
+    is_locked: false,
+    is_required: true,
+    help_text: "Select the grade assigned after inspection.",
+    options: ["Grade A", "Grade B", "Grade C"],
+  },
+  {
+    id: "f3",
+    dfd_id: "dfd_harvest_date",
+    field_key: "harvest_date",
+    label: "Harvest Date",
+    display_type: "date",
+    tag: "INFORMATIONAL",
+    is_system: false,
+    is_locked: false,
+    is_required: true,
+    help_text: "Date when the crop was harvested.",
+  },
+  {
+    id: "f4",
+    dfd_id: "dfd_moisture_pct",
+    field_key: "moisture_pct",
+    label: "Moisture %",
+    display_type: "decimal",
+    tag: "CAPACITY",
+    is_system: false,
+    is_locked: false,
+    is_required: false,
+    placeholder: "e.g. 12.5",
+    help_text: "Record measured moisture percentage if available.",
+    validation_rules: { min_value: 0, max_value: 100 },
+  },
+  {
+    id: "f5",
+    dfd_id: "dfd_notes",
+    field_key: "notes",
+    label: "Notes",
+    display_type: "textarea",
+    tag: "INFORMATIONAL",
+    is_system: false,
+    is_locked: false,
+    is_required: false,
+    placeholder: "Add any relevant notes",
+    help_text: "Capture context or exceptions for this harvest log.",
+  },
+];
+
+const FORM_ISSUES: Issue[] = [
+  {
+    id: "issue_moisture_pct",
+    issue_type: "NUMERIC_UNIT_AMBIGUITY",
+    severity: "WARNING",
+    description: "Numeric label omits unit. Consider 'Moisture Percentage (%)' for clarity.",
+    suggestion: "Rename to 'Moisture Percentage (%)'.",
+    is_acknowledged: false,
+    acknowledged_at: null,
+    acknowledged_by: null,
+    affected_field: "f4",
+    affected_field_label: "Moisture %",
+    conflicting_field: null,
+    conflicting_field_label: null,
+  },
 ];
 
 /* ─── Page ────────────────────────────────────────────────────────── */
@@ -269,18 +438,14 @@ export default function ShowcasePage() {
       {/* ── Form Builder ──────────────────────────────────────────── */}
       <Section id="form-builder" title="Form Builder" badge="CRM">
         <ShambaFormBuilder
+          coopId="demo-coop"
           templateName="Production Harvest Log"
-          targetModel="ProductionRecord"
-          availableFields={AVAILABLE_FIELDS}
+          targetModel="PRODUCTION"
+          skeletonField={null}
+          registryFields={AVAILABLE_FIELDS}
           initialFields={FORM_FIELDS}
           canActivate={false}
-          semanticIssues={[{
-            field_label: "Moisture %",
-            issue_type:  "NUMERIC_UNIT_AMBIGUITY",
-            severity:    "WARNING",
-            description: "Numeric label omits unit. Consider 'Moisture Percentage (%)' for clarity.",
-            suggestion:  "Rename to 'Moisture Percentage (%)'",
-          }]}
+          semanticIssues={FORM_ISSUES}
         />
       </Section>
 

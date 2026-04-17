@@ -18,7 +18,7 @@ import {
   X, CheckCircle, Sprout, Building2,
 } from "lucide-react";
 import { ThemeToggle } from "@/components/providers/ThemeToggle";
-import { authApi, clearTokens, getUser, getRefreshToken } from "@/lib/api";
+import { authApi, clearTokens, getUser, getRefreshToken, type UserSnapshot } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 interface Notification {
@@ -67,15 +67,22 @@ const DEMO_NOTIFICATIONS: Notification[] = [
 
 export function TopBar({ onMenuClick, title, variant = "crm", cooperativeId }: TopBarProps) {
   const router = useRouter();
-  const user   = getUser() as Record<string, string> | null;
+  const [user, setUser] = useState<UserSnapshot | null>(null);
+  const [mounted, setMounted] = useState(false);
 
   const [notifOpen, setNotifOpen] = useState(false);
-  const [userOpen,  setUserOpen]  = useState(false);
+  const [userOpen, setUserOpen]  = useState(false);
   const [notifs, setNotifs]       = useState(DEMO_NOTIFICATIONS);
   const [loggingOut, setLoggingOut] = useState(false);
 
   const notifRef = useRef<HTMLDivElement>(null);
   const userRef  = useRef<HTMLDivElement>(null);
+
+  // Initialize user data only on client side
+  useEffect(() => {
+    setMounted(true);
+    setUser(getUser());
+  }, []);
 
   const unreadCount = notifs.filter((n) => !n.read).length;
 

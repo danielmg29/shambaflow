@@ -63,11 +63,14 @@ def validate_data(
             exclude=[
                 f.name for f in model_class._meta.get_fields()
                 if hasattr(f, 'column') and f.name not in data
-            ]
+            ] + ['member_number', 'cooperative', 'added_by']  # Auto-generated in save() or handled as FK
         )
     except ValidationError as e:
+        print(f"DEBUG: full_clean() ValidationError: {e.message_dict}")
         for field, messages in e.message_dict.items():
             for msg in messages:
                 errors.append({'field': field, 'message': msg})
+    except Exception as e:
+        print(f"DEBUG: full_clean() unexpected error: {type(e).__name__}: {str(e)}")
 
     return len(errors) == 0, errors

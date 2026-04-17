@@ -185,7 +185,6 @@ export default function CRMDashboardPage() {
               variant={stats?.capacity_index && stats.capacity_index >= 70 ? "primary" : "default"}
               trend="up"
               trendValue="+5 this month"
-              onClick={() => router.push(`${base}/analytics`)}
             />
             <StatCard
               label="Data Score"

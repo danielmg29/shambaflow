@@ -20,23 +20,62 @@ export function getRefreshToken(): string | null {
 }
 
 export function saveTokens(access: string, refresh: string) {
-  localStorage.setItem("sf_access", access);
-  localStorage.setItem("sf_refresh", refresh);
+  if (typeof window !== "undefined") {
+    localStorage.setItem("sf_access", access);
+    localStorage.setItem("sf_refresh", refresh);
+  }
 }
 
 export function clearTokens() {
-  localStorage.removeItem("sf_access");
-  localStorage.removeItem("sf_refresh");
-  localStorage.removeItem("sf_user");
+  if (typeof window !== "undefined") {
+    localStorage.removeItem("sf_access");
+    localStorage.removeItem("sf_refresh");
+    localStorage.removeItem("sf_user");
+  }
 }
 
 export function saveUser(user: object) {
-  localStorage.setItem("sf_user", JSON.stringify(user));
+  if (typeof window !== "undefined") {
+    localStorage.setItem("sf_user", JSON.stringify(user));
+  }
 }
 
-export function getUser(): Record<string, unknown> | null {
+export interface ModulePermissionFlags {
+  can_view: boolean;
+  can_create: boolean;
+  can_edit: boolean;
+  can_delete: boolean;
+  can_edit_templates?: boolean;
+}
+
+export interface UserSnapshot {
+  id: string;
+  email: string;
+  full_name: string;
+  user_type: "CHAIR" | "HELPER" | "BUYER" | "PLATFORM";
+  must_change_password?: boolean;
+  cooperative_id: string | null;
+  cooperative_name?: string | null;
+  helper_role: string | null;
+  is_email_verified?: boolean;
+  is_phone_verified?: boolean;
+  permissions?: Record<string, ModulePermissionFlags>;
+}
+
+export function getUser(): UserSnapshot | null {
+  if (typeof window === "undefined") return null;
   const raw = localStorage.getItem("sf_user");
   try { return raw ? JSON.parse(raw) : null; } catch { return null; }
+}
+
+export function hasPermission(
+  module: string,
+  action: keyof ModulePermissionFlags,
+  user: UserSnapshot | null = getUser()
+): boolean {
+  if (!user) return false;
+  if (user.user_type === "CHAIR") return true;
+  return Boolean(user.permissions?.[module]?.[action]);
 }
 
 // ── Core fetch ───────────────────────────────────────────────────
@@ -84,10 +123,10 @@ export async function apiFetch<T = unknown>(
 
   if (!res.ok) {
     const err = new ApiError(
-      data.error ?? `HTTP ${res.status}`,
+      data.message ?? data.detail ?? data.error ?? `HTTP ${res.status}`,
       res.status,
       data.errors ?? [],
-      data.code ?? "UNKNOWN_ERROR"
+      data.code ?? data.error ?? "UNKNOWN_ERROR"
     );
     throw err;
   }
@@ -106,7 +145,7 @@ async function attemptTokenRefresh(): Promise<boolean> {
     });
     if (!res.ok) return false;
     const data = await res.json();
-    if (data.access) {
+    if (data.access && typeof window !== "undefined") {
       localStorage.setItem("sf_access", data.access);
       return true;
     }
@@ -143,17 +182,7 @@ export class ApiError extends Error {
 export interface LoginResponse {
   access: string;
   refresh: string;
-  user: {
-    id: string;
-    email: string;
-    full_name: string;
-    user_type: "CHAIR" | "HELPER" | "BUYER" | "PLATFORM";
-    must_change_password: boolean;
-    cooperative_id: string | null;
-    helper_role: string | null;
-    is_email_verified: boolean;
-    is_phone_verified: boolean;
-  };
+  user: UserSnapshot;
 }
 
 export const authApi = {
@@ -247,6 +276,97 @@ export const authApi = {
     }),
 
   me: () => apiFetch("/api/auth/me/"),
-  updateMe: (data: object) =>
+  updateMe: (data: object | FormData) =>
     apiFetch("/api/auth/me/", { method: "PATCH", body: data }),
 };
+
+function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  const token =
+    typeof window !== "undefined" ? localStorage.getItem("sf_access") : null;
+  return {
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...extra,
+  };
+}
+
+// ── Error normaliser ───────────────────────────────────────────────────────────
+
+async function throwOnError(res: Response): Promise<never> {
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch {
+    body = { error: `HTTP ${res.status}` };
+  }
+  const b = body as Record<string, unknown>;
+  throw { error: b.error ?? `HTTP ${res.status}`, errors: b.errors ?? undefined };
+}
+
+// ── Blob download (export / template) ─────────────────────────────────────────
+
+export async function downloadBlob(path: string): Promise<Blob> {
+  const url = path.startsWith("http") ? path : `${API_BASE}${path}`;
+  const res = await fetch(url, { headers: authHeaders() });
+  if (!res.ok) await throwOnError(res);
+  return res.blob();
+}
+
+// ── Multipart POST (file upload) ───────────────────────────────────────────────
+
+export async function postForm<T = unknown>(
+  path: string,
+  formData: FormData
+): Promise<T> {
+  const url = path.startsWith("http") ? path : `${API_BASE}${path}`;
+  // Do NOT set Content-Type — browser sets it with the correct boundary
+  const res = await fetch(url, {
+    method: "POST",
+    headers: authHeaders(),
+    body: formData,
+  });
+  if (!res.ok) await throwOnError(res);
+  return res.json() as Promise<T>;
+}
+
+// ── Convenience apiClient object ───────────────────────────────────────────────
+
+export const apiClient = {
+  get<T = unknown>(path: string): Promise<T> {
+    return apiFetch<T>(path, { method: "GET" });
+  },
+
+  post<T = unknown>(path: string, body: object | FormData): Promise<T> {
+    return apiFetch<T>(path, {
+      method: "POST",
+      body,
+    });
+  },
+
+  patch<T = unknown>(path: string, body: object | FormData): Promise<T> {
+    return apiFetch<T>(path, {
+      method: "PATCH",
+      body,
+    });
+  },
+
+  put<T = unknown>(path: string, body: object | FormData): Promise<T> {
+    return apiFetch<T>(path, {
+      method: "PUT",
+      body,
+    });
+  },
+
+  delete<T = unknown>(path: string): Promise<T> {
+    return apiFetch<T>(path, { method: "DELETE" });
+  },
+
+  postForm<T = unknown>(path: string, formData: FormData): Promise<T> {
+    return postForm<T>(path, formData);
+  },
+
+  downloadBlob(path: string): Promise<Blob> {
+    return downloadBlob(path);
+  },
+};
+
+export default apiClient;

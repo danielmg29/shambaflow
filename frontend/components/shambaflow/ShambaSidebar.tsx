@@ -54,6 +54,7 @@ export interface SidebarItem {
 
 export interface ShambaSidebarProps {
   variant?: SidebarVariant;
+  items?: SidebarItem[];
   activeId?: string;
   onNavigate?: (id: string, href: string) => void;
   cooperativeName?: string;
@@ -67,14 +68,13 @@ export interface ShambaSidebarProps {
 /* ─── Nav data ────────────────────────────────────────────────────── */
 
 const CRM_NAV: SidebarItem[] = [
-  { id: "dashboard",   label: "Dashboard",        icon: LayoutDashboard, href: "/crm" },
+  { id: "dashboard",   label: "Dashboard",        icon: LayoutDashboard, href: "/crm/dashboard" },
   { id: "members",     label: "Members",           icon: Users,           href: "/crm/members",    badge: undefined },
   { id: "production",  label: "Production",        icon: Leaf,            href: "/crm/production" },
   { id: "livestock",   label: "Livestock",          icon: Heart,           href: "/crm/livestock" },
   { id: "governance",  label: "Governance",         icon: Gavel,           href: "/crm/governance" },
   { id: "finance",     label: "Finance",            icon: Wallet,          href: "/crm/finance" },
-  { id: "forms",       label: "Form Builder",       icon: ClipboardList,   href: "/crm/forms" },
-  { id: "analytics",   label: "Analytics",          icon: BarChart3,       href: "/crm/analytics" },
+  { id: "form-builder",       label: "Form Builder",       icon: ClipboardList,   href: "/crm/form-builder" },
   { id: "certification", label: "Certification",   icon: ShieldCheck,     href: "/crm/certification" },
   { id: "settings",    label: "Settings",           icon: Settings,        href: "/crm/settings" },
 ];
@@ -164,6 +164,7 @@ function NavItem({
 
 function SidebarShell({
   variant,
+  items,
   activeId = "dashboard",
   onNavigate,
   cooperativeName,
@@ -176,12 +177,12 @@ function SidebarShell({
   collapsed?: boolean;
   onToggleCollapsed?: () => void;
 }) {
-  const navItems = variant === "crm" ? CRM_NAV : TENDER_NAV;
+  const navItems = items ?? (variant === "crm" ? CRM_NAV : TENDER_NAV);
 
   return (
     <div
       className={cn(
-        "flex flex-col h-full bg-sidebar border-r border-sidebar-border flex-shrink-0 overflow-hidden",
+        "relative z-30 flex h-full flex-shrink-0 flex-col overflow-y-hidden overflow-x-visible border-r border-sidebar-border bg-sidebar",
         "transition-[width] duration-200 ease-in-out",
         collapsed ? "w-20" : "w-64"
       )}
@@ -189,28 +190,33 @@ function SidebarShell({
       {/* Logo + controls */}
       <div
         className={cn(
-          "flex items-center justify-between h-14 border-b border-sidebar-border flex-shrink-0",
-          collapsed ? "px-2" : "px-4"
+          "relative flex items-center justify-center border-b border-sidebar-border flex-shrink-0",
+          collapsed ? "h-20 px-2" : "h-20 px-4"
         )}
       >
         <ShambaLogo
-          size="sm"
+          size="md"
           mode={collapsed ? "icon" : "full"}
           fullSrc="/logo-full.svg"
           iconSrc="/logo-icon.svg"
+          className="mx-auto"
         />
-        <div className="flex items-center gap-1.5">
-          {onToggleCollapsed && (
-            <button
-              type="button"
-              onClick={onToggleCollapsed}
-              className="hidden lg:inline-flex items-center justify-center w-8 h-8 rounded-md text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent transition-colors"
-              aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-              title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            >
-              {collapsed ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
-            </button>
-          )}
+        {onToggleCollapsed && (
+          <button
+            type="button"
+            onClick={onToggleCollapsed}
+            className="fixed z-[80] hidden h-9 w-9 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-sidebar-border bg-background text-sidebar-foreground/70 shadow-xl ring-2 ring-background transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground lg:inline-flex"
+            style={{
+              top: "40px",
+              left: collapsed ? "80px" : "256px",
+            }}
+            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          >
+            {collapsed ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
+          </button>
+        )}
+        <div className="absolute right-2 flex items-center gap-1.5">
           {onClose && (
             <button
               onClick={onClose}
@@ -295,6 +301,7 @@ function SidebarShell({
 
 export function ShambaSidebar({
   variant = "crm",
+  items,
   activeId,
   onNavigate,
   cooperativeName,
@@ -309,6 +316,7 @@ export function ShambaSidebar({
 
   const shared = {
     variant,
+    items,
     activeId,
     onNavigate,
     cooperativeName,

@@ -1,775 +1,842 @@
 """
-ShambaFlow — Form Builder Semantic Validation Engine
-core/services/form_semantic.py
+ShambaFlow – Form Builder Semantic Validation Engine  (v2 — custom-field aware)
+================================================================================
+Pure-function validation. No OOP. No external ML libraries.
 
-Runs before a FormTemplate is activated. Analyses all FormField labels
-and their model mappings to catch problems that would either:
-  ERROR   → cause data integrity failures (blocks activation)
-  WARNING → confuse data-entry staff or create ambiguous data (can be acknowledged)
+Nine semantic checks:
+  1. LABEL_DUPLICATE         (ERROR)
+  2. ABBREVIATION_CLASH      (WARNING)
+  3. SWAHILI_SYNONYM         (WARNING)
+  4. LABEL_CORE_CONFLICT     (WARNING)  — skipped for custom fields
+  5. MODEL_FIELD_CLASH       (ERROR)    — applies to custom key clashes too
+  6. TYPE_MISMATCH           (ERROR/W)  — skipped for custom fields
+  7. REDUNDANT_CORE          (WARNING)  — skipped for custom fields
+  8. MISSING_REQUIRED        (ERROR)    — custom fields don't count as coverage
+  9. NUMERIC_UNIT_AMBIGUITY  (WARNING)
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SEMANTIC CHECKS (in order of severity)
+Custom fields (is_custom_field=True) store values in the target model's
+`extra_data` JSONB column, keyed by maps_to_model_field (a snake_case
+identifier). They are exempt from checks 4, 6, 7, and 8 because they do
+not reference an existing model column.
 
-  1. MODEL_FIELD_CLASH     ERROR   Two fields map to the same DB column.
-  2. TYPE_MISMATCH         ERROR   Widget type incompatible with DB column type.
-  3. MISSING_REQUIRED      ERROR   Non-nullable DB column with no default not covered.
-  4. LABEL_DUPLICATE       ERROR   Two labels have the same meaning after normalisation.
-  5. ABBREVIATION_CLASH    WARNING One label is a recognised abbreviation of another.
-  6. SWAHILI_SYNONYM       WARNING One label is the Swahili translation of another.
-  7. LABEL_CORE_CONFLICT   WARNING Label too similar to a core system field name.
-  8. REDUNDANT_CORE        WARNING Field maps to a column that is auto-populated.
-  9. NUMERIC_UNIT_AMBIGUITY WARNING Numeric field label omits the measurement unit.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SIMILARITY ALGORITHM (no external NLP dependencies)
-
-Labels are compared after:
-  • lowercase + strip punctuation
-  • tokenisation (split on whitespace and hyphens)
-  • stop-word removal (a, of, the, in, for, at, by, with, and, or)
-
-Duplicate detection uses THREE tests (any hit = flagged):
-  A. Token overlap: if the significant-token sets of both labels share ≥ 1
-     non-trivial token (len > 2), they are semantically related.
-     "Farmer Name" → {"farmer","name"}
-     "Member Name" → {"member","name"}
-     Overlap = {"name"} → LABEL_DUPLICATE
-  B. Substring containment: if one normalised label contains the other
-     as a complete substring, flag them.
-     "Name" ⊂ "Full Name of Member" → LABEL_DUPLICATE
-  C. Character edit distance: for labels with ≤ 12 characters each,
-     if SequenceMatcher ratio ≥ 0.82 → LABEL_DUPLICATE.
-     "Qty" vs "Qnty" → ratio ≈ 0.86 → LABEL_DUPLICATE
+Returns a list of issue dicts — the caller persists them as
+FormFieldSemanticIssue rows. This module makes NO database writes.
 """
 
 import re
-import logging
-from difflib import SequenceMatcher
-from typing import List, Dict, Any, Tuple, Optional, Set
-from django.utils import timezone
 
-logger = logging.getLogger("shambaflow")
+from django.apps import apps
 
-# ── Stop words removed before token comparison ────────────────────
-_STOP_WORDS: Set[str] = {
-    "a", "an", "the", "of", "in", "for", "at", "by", "with", "and",
-    "or", "to", "from", "on", "is", "are", "was", "be", "has", "have",
-    "this", "that", "it", "its", "per", "all", "each", "any",
-}
+from core.services.semantic_text import (
+    KNOWN_ABBREVIATIONS as _KNOWN_ABBREVIATIONS,
+    STOP_WORDS as _STOP_WORDS,
+    SWAHILI_SYNONYMS as _SWAHILI_SYNONYMS,
+    near_exact_labels as _near_exact_labels,
+    normalize_text as _normalize,
+    semantic_duplicate_labels as _semantic_duplicate_labels,
+    slugify_to_field_key as _shared_slugify_to_field_key,
+    tokenize_text as _tokens,
+)
 
-# ── Known abbreviation expansions ─────────────────────────────────
-# key = abbreviated form (lowercase)  →  value = expanded tokens
-_ABBREVIATIONS: Dict[str, Set[str]] = {
-    "dob":   {"date", "birth"},
-    "id":    {"identification", "identifier", "number"},
-    "no":    {"number"},
-    "num":   {"number"},
-    "qty":   {"quantity"},
-    "qnty":  {"quantity"},
-    "wt":    {"weight"},
-    "wgt":   {"weight"},
-    "kg":    {"kilogram", "kilograms", "weight"},
-    "lt":    {"litre", "litres", "volume"},
-    "ltr":   {"litre", "litres"},
-    "amt":   {"amount"},
-    "pmt":   {"payment"},
-    "ref":   {"reference"},
-    "reg":   {"registration", "registered"},
-    "nat":   {"national"},
-    "addr":  {"address"},
-    "ph":    {"phone"},
-    "tel":   {"telephone", "phone"},
-    "mob":   {"mobile", "phone"},
-    "gps":   {"location", "coordinate", "coordinates"},
-    "loc":   {"location"},
-    "yr":    {"year"},
-    "mo":    {"month"},
-    "dt":    {"date"},
-    "ts":    {"timestamp", "date", "time"},
-    "desc":  {"description"},
-    "prod":  {"production", "product"},
-    "mem":   {"member"},
-    "coop":  {"cooperative"},
-    "govt":  {"government"},
-    "agri":  {"agriculture", "agricultural"},
-}
 
-# ── Swahili ↔ English synonym dictionary ─────────────────────────
-# Keys are Swahili tokens; values are sets of English equivalents.
-_SWAHILI_EN: Dict[str, Set[str]] = {
-    "shamba":       {"farm", "land", "plot", "field"},
-    "mkulima":      {"farmer", "member", "grower"},
-    "mazao":        {"produce", "production", "harvest", "crop", "crops"},
-    "zao":          {"crop", "produce", "product"},
-    "uzalishaji":   {"production", "output", "yield"},
-    "mavuno":       {"harvest"},
-    "nguruwe":      {"pig", "swine"},
-    "ng'ombe":      {"cattle", "cow", "bovine"},
-    "mifugo":       {"livestock", "animals", "herd"},
-    "kondoo":       {"sheep"},
-    "mbuzi":        {"goat"},
-    "kuku":         {"poultry", "chicken"},
-    "samaki":       {"fish"},
-    "nyumba":       {"house", "building"},
-    "ardhi":        {"land", "plot", "parcel"},
-    "eka":          {"acre", "acreage"},
-    "eneo":         {"area", "region", "zone"},
-    "mkoa":         {"region", "province", "county"},
-    "wilaya":       {"district", "county"},
-    "kata":         {"ward"},
-    "kijiji":       {"village"},
-    "jina":         {"name"},
-    "nambari":      {"number", "id", "identifier"},
-    "tarehe":       {"date"},
-    "uzito":        {"weight"},
-    "bei":          {"price", "cost", "rate"},
-    "kiasi":        {"quantity", "amount", "volume"},
-    "ubora":        {"quality", "grade"},
-    "akaunti":      {"account"},
-    "mwanachama":   {"member"},
-    "chama":        {"cooperative", "association"},
-    "mkutano":      {"meeting"},
-    "uamuzi":       {"resolution", "decision"},
-    "fedha":        {"finance", "financial", "money", "funds"},
-    "mchango":      {"contribution"},
-    "akiba":        {"savings"},
-    "mapato":       {"revenue", "income"},
-    "matumizi":     {"expenditure", "expenses"},
-    "rekodi":       {"record"},
-    "taarifa":      {"report"},
-    "chanjo":       {"vaccination"},
-    "matibabu":     {"treatment", "medicine"},
-    "dawa":         {"medicine", "drug"},
-    "zahanati":     {"clinic", "health"},
-    "afya":         {"health"},
-    "umwagiliaji":  {"irrigation"},
-    "msimu":        {"season"},
-    "mkurugenzi":   {"director", "manager"},
-    "mweka_hazina": {"treasurer"},
-    "katibu":       {"clerk", "secretary"},
-    "msimamizi":    {"supervisor", "officer"},
-    "msaidizi":     {"assistant", "helper"},
-}
-
-# Pre-build a reverse map: English token → Swahili tokens that translate to it
-_EN_SWAHILI: Dict[str, Set[str]] = {}
-for sw, en_set in _SWAHILI_EN.items():
-    for en in en_set:
-        _EN_SWAHILI.setdefault(en, set()).add(sw)
-
-# ── Django field type → compatible display_type sets ──────────────
-# display_types NOT in the compatible set will be flagged TYPE_MISMATCH
-# (True = ERROR, False = WARNING for possibly-intentional mismatches)
-_TYPE_COMPATIBILITY: Dict[str, Tuple[Set[str], bool]] = {
-    # Django type: (compatible display_types, is_clear_error_if_not_in_set)
-    "CharField":            ({"text", "textarea", "dropdown", "multi_select"}, False),
-    "TextField":            ({"text", "textarea", "rich_text"}, False),
-    "CKEditor5Field":       ({"rich_text"}, False),
-    "IntegerField":         ({"number"}, True),
-    "BigIntegerField":      ({"number"}, True),
-    "PositiveIntegerField": ({"number"}, True),
-    "PositiveSmallIntegerField": ({"number"}, True),
-    "SmallIntegerField":    ({"number"}, True),
-    "DecimalField":         ({"decimal", "number"}, True),
-    "FloatField":           ({"decimal", "number"}, True),
-    "BooleanField":         ({"boolean"}, True),
-    "NullBooleanField":     ({"boolean"}, True),
-    "DateField":            ({"date"}, True),
-    "DateTimeField":        ({"datetime", "date"}, False),
-    "TimeField":            ({"text"}, False),
-    "EmailField":           ({"text"}, False),
-    "URLField":             ({"text"}, False),
-    "UUIDField":            ({"text"}, True),
-    "FileField":            ({"file_upload"}, True),
-    "ImageField":           ({"image_upload", "file_upload"}, True),
-    "JSONField":            ({"text", "textarea"}, False),
-    "SlugField":            ({"text"}, False),
-    "ForeignKey":           ({"dropdown", "number", "text"}, False),
-}
-
-# ── Model fields that are ALWAYS auto-populated by the system ─────
-# Forms should not ask the user to fill these in.
-_AUTO_POPULATED_FIELDS: Dict[str, Set[str]] = {
-    "Member":              {"id", "cooperative_id", "created_at", "updated_at", "added_by_id"},
-    "ProductionRecord":    {"id", "cooperative_id", "created_at", "updated_at", "recorded_by_id"},
-    "LivestockHealthLog":  {"id", "cooperative_id", "created_at", "updated_at", "recorded_by_id"},
-    "GovernanceRecord":    {"id", "cooperative_id", "created_at", "updated_at", "recorded_by_id"},
-    "FinancialRecord":     {"id", "cooperative_id", "created_at", "updated_at", "recorded_by_id"},
-    "MemberLandRecord":    {"id", "created_at", "updated_at"},
-    "MemberHerdRecord":    {"id", "created_at", "updated_at"},
-}
-
-# ── Labels that are "core system concepts" — mapping these in a form
-#    is redundant because the system always provides them ──────────
-_CORE_CONCEPT_TOKENS: Set[str] = {
-    "cooperative", "coop", "recorded", "added", "created", "submitted",
-    "timestamp", "uuid", "system",
+# ── Target model registry ─────────────────────────────────────────────────────
+# Keep in sync with FORM_BUILDER_TARGET_MODELS in core/models.py.
+FORM_BUILDER_TARGET_MODELS: dict[str, str] = {
+    "MEMBER":      "Member",
+    "PRODUCTION":  "ProductionRecord",
+    "LIVESTOCK":   "LivestockHealthLog",
+    "GOVERNANCE":  "GovernanceRecord",
+    "FINANCE":     "FinancialRecord",
+    "LAND":        "MemberLandRecord",
+    "HERD":        "MemberHerdRecord",
 }
 
 
-# ══════════════════════════════════════════════════════════════════
-#  TEXT NORMALISATION UTILITIES
-# ══════════════════════════════════════════════════════════════════
-
-def _normalise(label: str) -> str:
-    """Lowercase, strip punctuation, collapse whitespace."""
-    label = label.lower()
-    label = re.sub(r"[^\w\s]", " ", label)   # punctuation → space
-    label = re.sub(r"\s+", " ", label).strip()
-    return label
-
-
-def _tokenise(label: str) -> List[str]:
-    """Normalise and split into tokens, removing stop words."""
-    tokens = _normalise(label).split()
-    return [t for t in tokens if t not in _STOP_WORDS and len(t) > 1]
-
-
-def _significant_tokens(label: str) -> Set[str]:
-    """Return the set of significant (non-trivial) tokens."""
-    return set(_tokenise(label))
-
-
-def _similarity_ratio(a: str, b: str) -> float:
-    """SequenceMatcher ratio on normalised strings."""
-    return SequenceMatcher(None, _normalise(a), _normalise(b)).ratio()
+def _get_model(model_name: str):
+    """
+    Resolve a model class from the 'core' app.
+    Falls back to a cross-app scan if the core lookup fails.
+    Never raises — returns None on failure.
+    """
+    try:
+        return apps.get_model("core", model_name)
+    except LookupError:
+        pass
+    # fallback: search all apps by __name__
+    for m in apps.get_models():
+        if m.__name__ == model_name:
+            return m
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════
-#  INDIVIDUAL CHECKS
+#  CUSTOM KEY HELPERS  (used by views and frontend)
 # ══════════════════════════════════════════════════════════════════
 
-def _is_duplicate_pair(label_a: str, label_b: str) -> bool:
+def slugify_to_field_key(label: str) -> str:
+    return _shared_slugify_to_field_key(label)
+
+
+def validate_custom_key(key: str) -> str | None:
     """
-    Return True if label_a and label_b are semantically equivalent.
-
-    Tests:
-      A. Significant-token overlap ≥ 1 token (both tokens len > 2)
-      B. Substring containment (normalised)
-      C. Edit-distance ratio ≥ 0.82 for short labels
+    Validate a custom field key provided by the frontend.
+    Returns None if valid, or a human-readable error string if invalid.
     """
-    tokens_a = _significant_tokens(label_a)
-    tokens_b = _significant_tokens(label_b)
-
-    # Filter tokens longer than 2 characters to avoid noise
-    sig_a = {t for t in tokens_a if len(t) > 2}
-    sig_b = {t for t in tokens_b if len(t) > 2}
-
-    # A. Token overlap
-    if sig_a & sig_b:
-        return True
-
-    # B. Substring containment
-    norm_a = _normalise(label_a)
-    norm_b = _normalise(label_b)
-    if norm_a in norm_b or norm_b in norm_a:
-        return True
-
-    # C. Edit distance (only for short labels ≤ 15 chars each)
-    if len(norm_a) <= 15 and len(norm_b) <= 15:
-        if _similarity_ratio(label_a, label_b) >= 0.82:
-            return True
-
-    return False
+    if not key:
+        return "Custom field key cannot be empty."
+    if not re.match(r"^[a-z][a-z0-9_]{0,63}$", key):
+        return (
+            f'"{key}" is not a valid custom field key. '
+            "Use lowercase snake_case starting with a letter "
+            "(e.g. soil_type, harvest_weight_kg, irrigation_method)."
+        )
+    return None
 
 
-def _is_abbreviation_pair(label_a: str, label_b: str) -> bool:
-    """
-    Return True if one label is a recognised abbreviation of the other.
-    Checks the _ABBREVIATIONS table.
-    """
-    tokens_a = set(_tokenise(label_a))
-    tokens_b = set(_tokenise(label_b))
+_UNIT_KEYWORDS = frozenset({
+    "kg", "kgs", "grams", "g", "tonnes", "ton",
+    "ksh", "kes", "usd", "eur",
+    "km", "m", "meters", "metres", "cm",
+    "ha", "hectare", "hectares", "acres", "acre",
+    "l", "litres", "liters", "ml",
+    "percent", "%",
+    "days", "weeks", "months", "years",
+    "count", "number", "pieces", "units", "score",
+})
 
-    for abbr, expansions in _ABBREVIATIONS.items():
-        if abbr in tokens_a and expansions & tokens_b:
-            return True
-        if abbr in tokens_b and expansions & tokens_a:
-            return True
+_COMPATIBLE_TYPES: dict[str, set[str]] = {
+    "text":         {"CharField", "TextField", "EmailField", "URLField", "SlugField"},
+    "textarea":     {"TextField", "CharField"},
+    "number":       {"IntegerField", "PositiveIntegerField", "PositiveSmallIntegerField",
+                     "SmallIntegerField", "BigIntegerField", "AutoField"},
+    "decimal":      {"DecimalField", "FloatField"},
+    "date":         {"DateField"},
+    "datetime":     {"DateTimeField"},
+    "dropdown":     {"CharField", "TextField"},
+    "multi_select": {"JSONField", "TextField", "CharField"},
+    "boolean":      {"BooleanField", "NullBooleanField"},
+    "file_upload":  {"FileField"},
+    "image_upload": {"ImageField"},
+    "gps":          {"DecimalField", "FloatField", "CharField"},
+    "rich_text":    {"TextField", "CharField"},
+}
 
-    return False
+_INCOMPATIBLE_ERRORS: dict[str, set[str]] = {
+    "number":       {"FileField", "ImageField", "BooleanField", "DateField", "DateTimeField", "JSONField"},
+    "decimal":      {"FileField", "ImageField", "BooleanField", "DateField", "DateTimeField", "JSONField"},
+    "date":         {"IntegerField", "DecimalField", "FileField", "ImageField", "BooleanField", "JSONField"},
+    "datetime":     {"IntegerField", "DecimalField", "FileField", "ImageField", "BooleanField", "JSONField"},
+    "boolean":      {"DecimalField", "DateField", "DateTimeField", "FileField", "ImageField", "JSONField"},
+    "file_upload":  {"IntegerField", "DecimalField", "DateField", "DateTimeField", "BooleanField", "JSONField"},
+    "image_upload": {"IntegerField", "DecimalField", "DateField", "DateTimeField", "BooleanField", "JSONField"},
+}
 
+_SYSTEM_POPULATED_FIELDS = frozenset({
+    "cooperative", "cooperative_id",
+    "recorded_by", "recorded_by_id", 
+    "added_by", "added_by_id",
+    "submitted_by", "submitted_by_id",
+    "created_at", "updated_at",
+    "id",
+})
 
-def _is_swahili_synonym_pair(label_a: str, label_b: str) -> bool:
-    """
-    Return True if one label contains a Swahili word that translates
-    to a token in the other label (or vice versa).
-    """
-    tokens_a = set(_tokenise(label_a))
-    tokens_b = set(_tokenise(label_b))
+_AUTO_FILLED_FIELDS = frozenset({
+    "id", "created_at", "updated_at", "submitted_by", "submitted_by_id"
+})
 
-    # Check: Swahili token in A, English expansion in B
-    for sw_token in tokens_a:
-        if sw_token in _SWAHILI_EN:
-            en_equivalents = _SWAHILI_EN[sw_token]
-            if en_equivalents & tokens_b:
-                return True
+_USER_SELECTABLE_SYSTEM_FIELDS = frozenset({
+    "cooperative", "cooperative_id", 
+    "recorded_by", "recorded_by_id",
+    "added_by", "added_by_id"
+})
 
-    # Check: English token in A, Swahili token in B
-    for en_token in tokens_a:
-        if en_token in _EN_SWAHILI:
-            sw_equivalents = _EN_SWAHILI[en_token]
-            if sw_equivalents & tokens_b:
-                return True
-
-    # Swap: A and B
-    for sw_token in tokens_b:
-        if sw_token in _SWAHILI_EN:
-            if _SWAHILI_EN[sw_token] & tokens_a:
-                return True
-
-    return False
-
-
-def _is_core_conflict(label: str, target_model_name: str) -> bool:
-    """
-    Return True if the label conflicts with a core auto-populated concept.
-    """
-    tokens = _significant_tokens(label)
-    return bool(tokens & _CORE_CONCEPT_TOKENS)
-
-
-def _is_type_mismatch(display_type: str, django_field_type: str) -> Tuple[bool, bool]:
-    """
-    Return (is_mismatch: bool, is_error: bool).
-    is_error = True means it's a definite error (not just a warning).
-    """
-    if django_field_type not in _TYPE_COMPATIBILITY:
-        return False, False   # Unknown type — skip
-
-    compatible_types, is_error_if_mismatch = _TYPE_COMPATIBILITY[django_field_type]
-
-    if display_type not in compatible_types:
-        return True, is_error_if_mismatch
-
-    return False, False
+_ALWAYS_EXCLUDED = {"id", "created_at", "updated_at", "submitted_by", "submitted_by_id"}
 
 
-def _has_numeric_unit(label: str) -> bool:
-    """
-    Return True if a numeric field label includes a measurement unit.
-    Checks for common unit tokens in the label.
-    """
-    unit_tokens = {
-        "kg", "g", "grams", "kilogram", "kilograms",
-        "lt", "litre", "litres", "liter", "liters", "ml",
-        "km", "m", "meters", "metres", "feet", "ft",
-        "ksh", "kes", "usd", "eur", "shilling", "shillings",
-        "acres", "hectares", "ha", "sqm",
-        "head", "units", "pieces", "bags", "tonnes", "tons",
-        "hours", "days", "weeks", "months", "years",
-        "%", "percent", "percentage",
-    }
-    tokens = set(_tokenise(label))
-    return bool(tokens & unit_tokens)
+def _are_similar_labels(a: str, b: str) -> bool:
+    return _near_exact_labels(a, b) or _semantic_duplicate_labels(a, b)
 
 
-# ══════════════════════════════════════════════════════════════════
-#  FIELD INTROSPECTION UTILITIES
+def _is_acronym_of(short: str, long: str) -> bool:
+    ns = _normalize(short).replace(" ", "")
+    if not (2 <= len(ns) <= 6):
+        return False
+    words = [w for w in _normalize(long).split() if w not in _STOP_WORDS and w]
+    return bool(words) and ns == "".join(w[0] for w in words)
+
+#  MODEL FIELD INTROSPECTION
 # ══════════════════════════════════════════════════════════════════
 
-def get_model_field_info(model_class) -> Dict[str, Dict[str, Any]]:
+def get_model_fields_info(target_model_key: str) -> list[dict]:
     """
-    Return a dict of {field_name: field_info} for all concrete fields
-    on a Django model. Used during validation to inspect field types
-    and nullability.
+    Return metadata for all fields on the target model, including system fields
+    with smart classification for UI display.
+    
+    Each field includes:
+    - system_field_type: "auto_filled" | "user_selectable" | "regular"
+    - is_system_field: true for system fields
+    - user_guidance: helpful text for form builder UI
+    
+    The extra_data column itself is excluded — it is the storage bucket for
+    custom fields and is not a mappable target on its own.
     """
-    info = {}
+    model_name = FORM_BUILDER_TARGET_MODELS.get(target_model_key)
+    if not model_name:
+        return []
+    model_class = _get_model(model_name)
+    if model_class is None:
+        return []
+
+    result = []
     for field in model_class._meta.get_fields():
         if not hasattr(field, "column"):
-            continue   # Skip reverse relations
-        info[field.name] = {
-            "django_type": type(field).__name__,
-            "null":        getattr(field, "null", True),
-            "blank":       getattr(field, "blank", True),
-            "has_default": (
-                hasattr(field, "default")
-                and field.default is not field.__class__.default
+            continue
+        # Exclude extra_data — it's not a mappable target, it's the bucket
+        if field.name == "extra_data":
+            continue
+        if getattr(field, "primary_key", False):
+            continue
+
+        null = getattr(field, "null", True)
+        blank = getattr(field, "blank", True)
+        dv = getattr(field, "default", None)
+        has_default = (
+            dv is not None
+            and not (hasattr(dv, "__name__") and dv.__name__ == "NOT_PROVIDED")
+            and str(type(dv)) != "<class 'django.db.models.fields.NOT_PROVIDED'>"
+        )
+        is_required = not null and not blank and not has_default
+
+        choices = (
+            [{"value": str(c[0]), "label": str(c[1])} for c in field.choices]
+            if getattr(field, "choices", None) else []
+        )
+        is_relation = hasattr(field, "related_model") and field.related_model is not None
+        field_type = (
+            field.get_internal_type()
+            if hasattr(field, "get_internal_type")
+            else type(field).__name__
+        )
+
+        # Classify system field type
+        is_system_field = field.name in _SYSTEM_POPULATED_FIELDS
+        if field.name in _AUTO_FILLED_FIELDS:
+            system_field_type = "auto_filled"
+            user_guidance = "This field is automatically filled by the system - you should not add it to forms."
+        elif field.name in _USER_SELECTABLE_SYSTEM_FIELDS:
+            system_field_type = "user_selectable"
+            user_guidance = "This is a system field that you can select values for, but it's managed by the system."
+        else:
+            system_field_type = "regular"
+            user_guidance = ""
+
+        result.append({
+            "field_name":    field.name,
+            "verbose_name":  str(getattr(field, "verbose_name", field.name)).capitalize(),
+            "django_type":   field_type,
+            "is_required":   bool(is_required),
+            "has_choices":   bool(choices),
+            "choices":       choices,
+            "max_length":    getattr(field, "max_length", None),
+            "help_text":     str(getattr(field, "help_text", "")),
+            "is_relation":   bool(is_relation),
+            "related_model": (
+                field.related_model.__name__
+                if is_relation and field.related_model else None
             ),
-            "primary_key": getattr(field, "primary_key", False),
-            "editable":    getattr(field, "editable", True),
-        }
-    return info
+            # Always False here — this entry represents an existing model column.
+            # The frontend uses this flag to differentiate from custom fields.
+            "is_custom":     False,
+            # New fields for smart system field handling
+            "is_system_field":      is_system_field,
+            "system_field_type":    system_field_type,
+            "user_guidance":        user_guidance,
+        })
+    return result
 
 
-def get_required_model_fields(model_class, auto_populated: Set[str]) -> Set[str]:
-    """
-    Return the set of field names that MUST be provided by the form
-    (non-nullable, no default, not auto-populated, not the PK).
-    """
+def _get_required_model_fields(target_model_key: str) -> set[str]:
+    """Non-nullable, no-default model fields that must be covered by real form fields."""
+    model_name = FORM_BUILDER_TARGET_MODELS.get(target_model_key)
+    if not model_name:
+        return set()
+    model_class = _get_model(model_name)
+    if model_class is None:
+        return set()
+
     required = set()
     for field in model_class._meta.get_fields():
         if not hasattr(field, "column"):
             continue
-        if field.primary_key:
+        if field.name in _ALWAYS_EXCLUDED:
             continue
-        if field.name in auto_populated:
+        if field.name == "extra_data":
             continue
-        if not getattr(field, "editable", True):
+        if getattr(field, "primary_key", False):
             continue
-        null        = getattr(field, "null", True)
-        blank       = getattr(field, "blank", True)
+        null = getattr(field, "null", True)
+        blank = getattr(field, "blank", True)
+        dv = getattr(field, "default", None)
         has_default = (
-            hasattr(field, "default")
-            and field.default is not field.__class__.default
+            dv is not None
+            and str(type(dv)) != "<class 'django.db.models.fields.NOT_PROVIDED'>"
         )
-        if not null and not has_default:
+        if not null and not blank and not has_default:
             required.add(field.name)
     return required
 
 
+def _get_field_internal_type(target_model_key: str, field_name: str) -> str | None:
+    model_name = FORM_BUILDER_TARGET_MODELS.get(target_model_key)
+    if not model_name:
+        return None
+    try:
+        model_class = _get_model(model_name)
+        if model_class is None:
+            return None
+        f = model_class._meta.get_field(field_name)
+        return (
+            f.get_internal_type() if hasattr(f, "get_internal_type") else type(f).__name__
+        )
+    except Exception:
+        return None
+
+
+def _get_core_field_labels(target_model_key: str) -> list[str]:
+    model_name = FORM_BUILDER_TARGET_MODELS.get(target_model_key)
+    if not model_name:
+        return []
+    model_class = _get_model(model_name)
+    if model_class is None:
+        return []
+    labels = []
+    for field in model_class._meta.get_fields():
+        if hasattr(field, "verbose_name"):
+            labels.append(str(field.verbose_name))
+        labels.append(field.name.replace("_", " "))
+    return labels
+
+
 # ══════════════════════════════════════════════════════════════════
-#  MASTER VALIDATION ORCHESTRATOR
+#  THE NINE CHECKS
+#
+#  Custom fields (is_custom_field=True) are EXEMPT from:
+#    4. LABEL_CORE_CONFLICT  — adding new data, not renaming existing columns
+#    6. TYPE_MISMATCH        — no Django field to compare the widget against
+#    7. REDUNDANT_CORE       — by definition they are new keys, not system fields
+#    8. MISSING_REQUIRED     — custom keys go into extra_data, not real columns
+#
+#  Custom fields ARE subject to:
+#    1. LABEL_DUPLICATE          — duplicate labels confuse users regardless of storage
+#    2. ABBREVIATION_CLASH       — same ambiguity risk
+#    3. SWAHILI_SYNONYM          — same bilingual duplication risk
+#    5. MODEL_FIELD_CLASH        — two custom fields with the same key collide in extra_data
+#    9. NUMERIC_UNIT_AMBIGUITY   — same UX clarity risk
 # ══════════════════════════════════════════════════════════════════
 
-def run_semantic_validation(template) -> List[Dict[str, Any]]:
+def _check_label_duplicates(fields: list) -> list[dict]:
+    """Check 1: LABEL_DUPLICATE — ERROR. Applies to all fields."""
+    issues = []
+    n = len(fields)
+    for i in range(n):
+        for j in range(i + 1, n):
+            fa, fb = fields[i], fields[j]
+            if _are_similar_labels(fa["label"], fb["label"]):
+                issues.append({
+                    "issue_type":           "LABEL_DUPLICATE",
+                    "severity":             "ERROR",
+                    "affected_field_id":    str(fa["id"]),
+                    "conflicting_field_id": str(fb["id"]),
+                    "description": (
+                        f'The labels "{fa["label"]}" and "{fb["label"]}" have the same meaning. '
+                        "Data entry staff will not know which field to fill."
+                    ),
+                    "suggestion": "Rename one field to make its purpose unambiguous.",
+                })
+    return issues
+
+
+def _check_abbreviation_clashes(fields: list) -> list[dict]:
+    """Check 2: ABBREVIATION_CLASH — WARNING. Applies to all fields."""
+    issues = []
+    n = len(fields)
+    for i in range(n):
+        norm_i = _normalize(fields[i]["label"])
+        if norm_i in _KNOWN_ABBREVIATIONS:
+            full_form = _KNOWN_ABBREVIATIONS[norm_i]
+            for j in range(n):
+                if i == j:
+                    continue
+                if full_form in _normalize(fields[j]["label"]):
+                    issues.append({
+                        "issue_type":           "ABBREVIATION_CLASH",
+                        "severity":             "WARNING",
+                        "affected_field_id":    str(fields[i]["id"]),
+                        "conflicting_field_id": str(fields[j]["id"]),
+                        "description": (
+                            f'"{fields[i]["label"]}" appears to be an abbreviation of '
+                            f'"{fields[j]["label"]}" ({_KNOWN_ABBREVIATIONS[norm_i]}).'
+                        ),
+                        "suggestion": "Use the full label consistently, or remove the abbreviated field.",
+                    })
+        for j in range(n):
+            if i == j:
+                continue
+            if _is_acronym_of(fields[i]["label"], fields[j]["label"]):
+                key = (str(fields[i]["id"]), str(fields[j]["id"]))
+                if not any(
+                    x["issue_type"] == "ABBREVIATION_CLASH"
+                    and x["affected_field_id"] == key[0]
+                    and x["conflicting_field_id"] == key[1]
+                    for x in issues
+                ):
+                    issues.append({
+                        "issue_type":           "ABBREVIATION_CLASH",
+                        "severity":             "WARNING",
+                        "affected_field_id":    key[0],
+                        "conflicting_field_id": key[1],
+                        "description": (
+                            f'"{fields[i]["label"]}" appears to be an acronym of '
+                            f'"{fields[j]["label"]}".'
+                        ),
+                        "suggestion": f'Remove "{fields[i]["label"]}" or expand it to its full form.',
+                    })
+    return issues
+
+
+def _check_swahili_synonyms(fields: list) -> list[dict]:
+    """Check 3: SWAHILI_SYNONYM — WARNING. Applies to all fields."""
+    issues = []
+    token_sets = [(_tokens(f["label"]), f) for f in fields]
+    for i, (tok_i, fi) in enumerate(token_sets):
+        for sw_word, en_equivalents in _SWAHILI_SYNONYMS:
+            if sw_word not in tok_i:
+                continue
+            for j, (tok_j, fj) in enumerate(token_sets):
+                if i == j:
+                    continue
+                if any(eng in tok_j for eng in en_equivalents):
+                    issues.append({
+                        "issue_type":           "SWAHILI_SYNONYM",
+                        "severity":             "WARNING",
+                        "affected_field_id":    str(fi["id"]),
+                        "conflicting_field_id": str(fj["id"]),
+                        "description": (
+                            f'"{fi["label"]}" uses Swahili "{sw_word}", '
+                            f'which means the same as "{fj["label"]}".'
+                        ),
+                        "suggestion": (
+                            "If bilingual labels are intentional this is fine. "
+                            "Otherwise standardise to one language."
+                        ),
+                    })
+                    break
+    return issues
+
+
+def _check_label_core_conflicts(fields: list, target_model_key: str) -> list[dict]:
     """
-    Run all semantic checks on a FormTemplate and its fields.
+    Check 4: LABEL_CORE_CONFLICT — WARNING.
+    SKIPPED for custom fields — they add new keys, not rename existing columns.
+    """
+    issues = []
+    # Only check non-custom fields
+    real_fields = [f for f in fields if not f.get("is_custom_field", False)]
+    core_labels = _get_core_field_labels(target_model_key)
+    for field in real_fields:
+        for core_label in core_labels:
+            if _are_similar_labels(field["label"], core_label):
+                issues.append({
+                    "issue_type":           "LABEL_CORE_CONFLICT",
+                    "severity":             "WARNING",
+                    "affected_field_id":    str(field["id"]),
+                    "conflicting_field_id": None,
+                    "description": (
+                        f'Your label "{field["label"]}" is very similar to the system field '
+                        f'"{core_label}". This may confuse data entry staff.'
+                    ),
+                    "suggestion": f'Use a more specific label that clearly differs from "{core_label}".',
+                })
+                break
+    return issues
 
-    Creates / updates FormFieldSemanticIssue records.
-    Returns a list of issue dicts for the caller to display.
 
-    Steps:
-      1. Clear previous issues for this template.
-      2. Introspect the target model.
-      3. Run pairwise checks (label duplicates, abbreviations, Swahili).
-      4. Run per-field checks (type mismatch, redundant core, unit ambiguity).
-      5. Run coverage checks (missing required fields, field clashes).
-      6. Update template.has_blocking_errors and template.status.
+def _check_model_field_clashes(fields: list) -> list[dict]:
+    """
+    Check 5: MODEL_FIELD_CLASH — ERROR.
+    Applies to all fields — two custom fields with the same key would collide
+    in extra_data exactly as two real fields would collide in a table column.
+    """
+    issues = []
+    seen: dict[str, str] = {}
+    for field in fields:
+        mf = field["maps_to_model_field"]
+        is_custom = field.get("is_custom_field", False)
+        if mf in seen:
+            location = "in the extra_data JSON" if is_custom else "in the model table"
+            issues.append({
+                "issue_type":           "MODEL_FIELD_CLASH",
+                "severity":             "ERROR",
+                "affected_field_id":    str(field["id"]),
+                "conflicting_field_id": seen[mf],
+                "description": (
+                    f'Two form fields both write to "{mf}" {location}. '
+                    "The second write will silently overwrite the first."
+                ),
+                "suggestion": "Remove the duplicate or choose a different key for one of them.",
+            })
+        else:
+            seen[mf] = str(field["id"])
+    return issues
+
+
+def _check_type_mismatches(fields: list, target_model_key: str) -> list[dict]:
+    """
+    Check 6: TYPE_MISMATCH — ERROR or WARNING.
+    SKIPPED for custom fields — they write to extra_data (JSONB), which accepts
+    any serialisable type regardless of the display widget chosen.
+    """
+    issues = []
+    real_fields = [f for f in fields if not f.get("is_custom_field", False)]
+    for field in real_fields:
+        internal_type = _get_field_internal_type(
+            target_model_key, field["maps_to_model_field"]
+        )
+        if internal_type is None:
+            continue
+        display = field["display_type"]
+        compatible = _COMPATIBLE_TYPES.get(display, set())
+        error_set  = _INCOMPATIBLE_ERRORS.get(display, set())
+        if internal_type in compatible:
+            continue
+        severity = "ERROR" if internal_type in error_set else "WARNING"
+        issues.append({
+            "issue_type":           "TYPE_MISMATCH",
+            "severity":             severity,
+            "affected_field_id":    str(field["id"]),
+            "conflicting_field_id": None,
+            "description": (
+                f'The widget "{display}" is '
+                f'{"incompatible" if severity == "ERROR" else "unusual"} '
+                f'for a "{internal_type}" column ("{field["maps_to_model_field"]}").'
+            ),
+            "suggestion": (
+                f'Change the widget to one compatible with "{internal_type}": '
+                f'{", ".join(sorted(compatible))}.'
+                if severity == "ERROR"
+                else "Verify the widget type is correct for this field."
+            ),
+        })
+    return issues
+
+
+def _check_redundant_core(fields: list) -> list[dict]:
+    """
+    Check 7: REDUNDANT_CORE — WARNING.
+    Only triggers for auto-filled system fields that users should never add.
+    User-selectable system fields are allowed since users may need to set them.
+    SKIPPED for custom fields — they are new keys by definition, never system fields.
+    """
+    issues = []
+    real_fields = [f for f in fields if not f.get("is_custom_field", False)]
+    for field in real_fields:
+        if field["maps_to_model_field"] in _AUTO_FILLED_FIELDS:
+            issues.append({
+                "issue_type":           "REDUNDANT_CORE",
+                "severity":             "WARNING",
+                "affected_field_id":    str(field["id"]),
+                "conflicting_field_id": None,
+                "description": (
+                    f'"{field["label"]}" maps to "{field["maps_to_model_field"]}", '
+                    "which the system sets automatically. "
+                    "Adding it creates two sources of truth."
+                ),
+                "suggestion": (
+                    f'Remove this field — "{field["maps_to_model_field"]}" '
+                    "is auto-populated on submission."
+                ),
+            })
+    return issues
+
+
+def _check_missing_required(
+    fields: list,
+    target_model_key: str,
+    field_defaults: dict,
+) -> list[dict]:
+    """
+    Check 8: MISSING_REQUIRED — ERROR.
+    Custom fields do NOT count as coverage for required model columns —
+    they go into extra_data, not into the column itself.
+    Only real (non-custom) field mappings and field_defaults count.
+    """
+    issues = []
+    required = _get_required_model_fields(target_model_key)
+    # Only real field mappings satisfy model-level required constraints
+    real_mappings = {
+        f["maps_to_model_field"]
+        for f in fields
+        if not f.get("is_custom_field", False)
+    }
+    covered = real_mappings | set(field_defaults.keys())
+    for req in required:
+        if req not in covered:
+            issues.append({
+                "issue_type":           "MISSING_REQUIRED",
+                "severity":             "ERROR",
+                "affected_field_id":    None,
+                "conflicting_field_id": None,
+                "description": (
+                    f'The model field "{req}" is required (non-nullable, no default) '
+                    "but is not covered by any form field. Submitting will fail."
+                ),
+                "suggestion": (
+                    f'Add a form field mapping to "{req}", or add it to the '
+                    "template's field_defaults."
+                ),
+            })
+    return issues
+
+
+def _check_numeric_unit_ambiguity(fields: list) -> list[dict]:
+    """Check 9: NUMERIC_UNIT_AMBIGUITY — WARNING. Applies to all fields."""
+    issues = []
+    numeric_fields = [f for f in fields if f["display_type"] in {"number", "decimal"}]
+    if len(numeric_fields) < 2:
+        return issues
+    for field in numeric_fields:
+        if not (_tokens(field["label"]) & _UNIT_KEYWORDS):
+            issues.append({
+                "issue_type":           "NUMERIC_UNIT_AMBIGUITY",
+                "severity":             "WARNING",
+                "affected_field_id":    str(field["id"]),
+                "conflicting_field_id": None,
+                "description": (
+                    f'"{field["label"]}" has no unit. '
+                    "With multiple numeric fields, missing units confuse data entry."
+                ),
+                "suggestion": (
+                    f'Add a unit, e.g. "{field["label"]} (kg)" or "{field["label"]} (KSh)".'
+                ),
+            })
+    return issues
+
+
+# ══════════════════════════════════════════════════════════════════
+#  PUBLIC API
+# ══════════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════════
+#  CHECK 10 — CUSTOM_KEY_MISSING_DEF  (ERROR)
+# ══════════════════════════════════════════════════════════════════
+
+def _check_custom_key_missing_def(fields: list, template) -> list[dict]:
+    """
+    CUSTOM_KEY_MISSING_DEF — ERROR
+    Every FormField with is_custom_field=True must have a corresponding
+    DynamicFieldDefinition (cooperative, target_model, field_key) that is
+    active.  Without it, the submission service has no schema to validate
+    against, and the extra_data key is effectively undocumented.
+
+    Skipped gracefully if apps.form_builder is not installed (e.g. during
+    initial migrations).
+    """
+    custom_fields = [f for f in fields if f.get("is_custom_field", False)]
+    if not custom_fields:
+        return []
+
+    try:
+        from core.models import DynamicFieldDefinition
+    except ImportError:
+        return []
+
+    existing_keys: set[str] = set(
+        DynamicFieldDefinition.objects.filter(
+            cooperative=template.cooperative,
+            target_model=template.target_model,
+            is_active=True,
+        ).values_list("field_key", flat=True)
+    )
+
+    issues = []
+    for field in custom_fields:
+        key = field["maps_to_model_field"]
+        if key not in existing_keys:
+            issues.append({
+                "issue_type":           "CUSTOM_KEY_MISSING_DEF",
+                "severity":             "ERROR",
+                "affected_field_id":    str(field["id"]),
+                "conflicting_field_id": None,
+                "description": (
+                    f'"{field["label"]}" is a custom field (stored in extra_data) '
+                    f'with key "{key}", but no active DynamicFieldDefinition exists '
+                    f"for this key on the '{template.target_model}' model. "
+                    f"Without a definition, the submission service cannot validate or "
+                    f"document this field."
+                ),
+                "suggestion": (
+                    f'Create a DynamicFieldDefinition with field_key="{key}" '
+                    f"for this cooperative and target model, then re-validate. "
+                    f"Use POST /api/form-builder/dynamic-fields/ to register it."
+                ),
+            })
+    return issues
+
+
+# ══════════════════════════════════════════════════════════════════
+#  PUBLIC API
+# ══════════════════════════════════════════════════════════════════
+
+def run_semantic_validation(template) -> list[dict]:
+    """
+    Run all TEN semantic checks against every field in the template.
+    Returns a flat list of issue dicts.
+
+    is_custom_field is fetched from the database so custom-field-aware
+    checks (4, 6, 7, 8, 10) work correctly.
+
+    Makes NO database writes — pure computation.
+
+    Check catalogue:
+      1.  LABEL_DUPLICATE        ERROR   — two labels share the same meaning
+      2.  ABBREVIATION_CLASH     WARNING — one label is a short form of another
+      3.  SWAHILI_SYNONYM        WARNING — one label is the Swahili translation
+      4.  LABEL_CORE_CONFLICT    WARNING — label clashes with a core field name
+                                           (skipped for custom fields)
+      5.  MODEL_FIELD_CLASH      ERROR   — two fields map to the same column
+                                           (custom: same extra_data key)
+      6.  TYPE_MISMATCH          ERROR/W — widget type incompatible with column
+                                           (skipped for custom fields)
+      7.  REDUNDANT_CORE         WARNING — maps to system-auto-populated field
+                                           (skipped for custom fields)
+      8.  MISSING_REQUIRED       ERROR   — required model field not covered
+                                           (custom fields don't count as coverage)
+      9.  NUMERIC_UNIT_AMBIGUITY WARNING — numeric label missing unit
+      10. CUSTOM_KEY_MISSING_DEF ERROR   — custom field has no DFD registry entry
+    """
+    raw_fields = list(
+        template.fields.values(
+            "id", "label", "display_type", "maps_to_model_field", "tag",
+            "is_custom_field",   # required for checks 4, 6, 7, 8, 10
+        )
+    )
+    field_defaults = template.field_defaults or {}
+
+    all_issues: list[dict] = []
+    all_issues += _check_label_duplicates(raw_fields)
+    all_issues += _check_abbreviation_clashes(raw_fields)
+    all_issues += _check_swahili_synonyms(raw_fields)
+    all_issues += _check_label_core_conflicts(raw_fields, template.target_model)
+    all_issues += _check_model_field_clashes(raw_fields)
+    all_issues += _check_type_mismatches(raw_fields, template.target_model)
+    all_issues += _check_redundant_core(raw_fields)
+    all_issues += _check_missing_required(raw_fields, template.target_model, field_defaults)
+    all_issues += _check_numeric_unit_ambiguity(raw_fields)
+    all_issues += _check_custom_key_missing_def(raw_fields, template)    # ← check 10
+    return all_issues
+
+
+def has_blocking_errors(issues: list[dict]) -> bool:
+    """True if any issue is an ERROR — always blocks template activation."""
+    return any(i["severity"] == "ERROR" for i in issues)
+
+
+def _issue_signature(issue: dict) -> tuple[str, str | None, str | None]:
+    return (
+        issue["issue_type"],
+        issue.get("affected_field_id"),
+        issue.get("conflicting_field_id"),
+    )
+
+
+def persist_semantic_issues(template, new_issues: list[dict]) -> None:
+    """
+    Merge freshly computed issues into persistent FormFieldSemanticIssue rows.
+
+    Behaviour:
+    - Remove stale unacknowledged issues
+    - Preserve acknowledged WARNINGs whose signature still exists
+    - Create rows for any new signatures
+    - Refresh template.has_blocking_errors + template.status
     """
     from core.models import FormField, FormFieldSemanticIssue, FormTemplate
 
-    issues_created = []
+    new_sigs = {_issue_signature(issue) for issue in new_issues}
 
-    # ── Step 1: Clear previous run ────────────────────────────────
-    FormFieldSemanticIssue.objects.filter(template=template).delete()
-
-    # ── Step 2: Introspect target model ───────────────────────────
-    model_class = template.target_model_class
-    if model_class is None:
-        logger.error("Cannot validate: target model class not found for %s", template)
-        return []
-
-    model_name        = model_class.__name__
-    model_fields_info = get_model_field_info(model_class)
-    auto_populated    = _AUTO_POPULATED_FIELDS.get(model_name, set())
-    required_fields   = get_required_model_fields(model_class, auto_populated)
-
-    # Build sets from the template's field defaults
-    default_covered = set(template.field_defaults.keys())
-
-    # Fetch all form fields
-    fields = list(FormField.objects.filter(template=template).select_related("template"))
-
-    if not fields:
-        return []
-
-    # ── Helper to persist an issue ─────────────────────────────────
-    def _create_issue(
-        affected_field: FormField,
-        issue_type: str,
-        severity: str,
-        description: str,
-        suggestion: str = "",
-        conflicting_field: Optional[FormField] = None,
-    ):
-        issue = FormFieldSemanticIssue.objects.create(
-            template=template,
-            affected_field=affected_field,
-            conflicting_field=conflicting_field,
-            issue_type=issue_type,
-            severity=severity,
-            description=description,
-            suggestion=suggestion,
+    existing = list(template.semantic_issues.all())
+    keep_ids: set[str] = set()
+    for ex in existing:
+        ex_sig = (
+            ex.issue_type,
+            str(ex.affected_field_id) if ex.affected_field_id else None,
+            str(ex.conflicting_field_id) if ex.conflicting_field_id else None,
         )
-        issues_created.append({
-            "field":       affected_field.label,
-            "issue_type":  issue_type,
-            "severity":    severity,
-            "description": description,
-        })
-        return issue
+        if ex.is_acknowledged and ex.severity == "WARNING" and ex_sig in new_sigs:
+            keep_ids.add(str(ex.id))
 
-    # ── Step 3: MODEL_FIELD_CLASH (ERROR) ─────────────────────────
-    # Two form fields mapping to the same model column
-    seen_mappings: Dict[str, FormField] = {}
-    for field in fields:
-        mapped = field.maps_to_model_field
-        if mapped in seen_mappings:
-            other = seen_mappings[mapped]
-            _create_issue(
-                affected_field=field,
-                issue_type="MODEL_FIELD_CLASH",
-                severity="ERROR",
-                description=(
-                    f'"{field.label}" and "{other.label}" both map to the '
-                    f'model field "{mapped}". A form cannot write to the same '
-                    f"database column twice."
-                ),
-                suggestion=(
-                    f"Remove one of the two fields, or change one to map to a "
-                    f"different model column."
-                ),
-                conflicting_field=other,
-            )
-        else:
-            seen_mappings[mapped] = field
+    template.semantic_issues.exclude(id__in=keep_ids).delete()
 
-    # ── Step 4: TYPE_MISMATCH (ERROR / WARNING) ────────────────────
-    for field in fields:
-        mapped = field.maps_to_model_field
-        if mapped not in model_fields_info:
-            continue   # MISSING_REQUIRED check will catch unknown fields
-        django_type  = model_fields_info[mapped]["django_type"]
-        is_mismatch, is_error = _is_type_mismatch(field.display_type, django_type)
-        if is_mismatch:
-            severity = "ERROR" if is_error else "WARNING"
-            _create_issue(
-                affected_field=field,
-                issue_type="TYPE_MISMATCH",
-                severity=severity,
-                description=(
-                    f'"{field.label}" uses widget type "{field.display_type}" but '
-                    f'the database column "{mapped}" is a {django_type}. '
-                    f"Data entered may fail to save."
-                ),
-                suggestion=(
-                    f"Change the widget type to one compatible with {django_type}. "
-                    f"Compatible types: "
-                    f"{', '.join(_TYPE_COMPATIBILITY.get(django_type, (set(), False))[0])}."
-                ),
-            )
-
-    # ── Step 5: MISSING_REQUIRED (ERROR) ──────────────────────────
-    covered_by_form    = set(seen_mappings.keys())
-    covered_completely = covered_by_form | default_covered
-    missing = required_fields - covered_completely
-
-    if missing:
-        # Create one issue per missing field; attach to the first form field
-        anchor_field = fields[0]
-        for missing_col in missing:
-            _create_issue(
-                affected_field=anchor_field,
-                issue_type="MISSING_REQUIRED",
-                severity="ERROR",
-                description=(
-                    f'The database column "{missing_col}" on {model_name} is required '
-                    f"(non-nullable, no default) but is not covered by any form field "
-                    f"or field default. Submitting this form will raise a database error."
-                ),
-                suggestion=(
-                    f'Add a form field that maps to "{missing_col}", or add '
-                    f'"{missing_col}" to the template\'s field_defaults with an '
-                    f"auto-populated value."
-                ),
-            )
-
-    # ── Step 6: LABEL_DUPLICATE (ERROR) ───────────────────────────
-    labelled: List[FormField] = [f for f in fields]
-    flagged_duplicate_pairs: Set[Tuple[int, int]] = set()   # track (a.pk, b.pk) pairs
-
-    for i, field_a in enumerate(labelled):
-        for field_b in labelled[i + 1:]:
-            pair_key = (min(str(field_a.id), str(field_b.id)),
-                        max(str(field_a.id), str(field_b.id)))
-            if pair_key in flagged_duplicate_pairs:
-                continue
-            if _is_duplicate_pair(field_a.label, field_b.label):
-                flagged_duplicate_pairs.add(pair_key)
-                _create_issue(
-                    affected_field=field_a,
-                    issue_type="LABEL_DUPLICATE",
-                    severity="ERROR",
-                    description=(
-                        f'"{field_a.label}" and "{field_b.label}" appear to mean the '
-                        f"same thing. Two fields with the same meaning confuse data-entry "
-                        f"staff and create duplicate data."
-                    ),
-                    suggestion=(
-                        f"Rename or remove one of the two labels. If they capture different "
-                        f"information, make the distinction explicit in the label "
-                        f"(e.g., include units, time period, or qualifier)."
-                    ),
-                    conflicting_field=field_b,
-                )
-
-    # ── Step 7: ABBREVIATION_CLASH (WARNING) ──────────────────────
-    for i, field_a in enumerate(labelled):
-        for field_b in labelled[i + 1:]:
-            if _is_abbreviation_pair(field_a.label, field_b.label):
-                _create_issue(
-                    affected_field=field_a,
-                    issue_type="ABBREVIATION_CLASH",
-                    severity="WARNING",
-                    description=(
-                        f'"{field_a.label}" appears to be an abbreviation of '
-                        f'"{field_b.label}" (or vice versa). If they represent the same '
-                        f"attribute, data-entry staff may fill in both."
-                    ),
-                    suggestion=(
-                        "Use the full, unabbreviated label consistently. "
-                        "If they are genuinely distinct, add a qualifier to each label."
-                    ),
-                    conflicting_field=field_b,
-                )
-
-    # ── Step 8: SWAHILI_SYNONYM (WARNING) ─────────────────────────
-    for i, field_a in enumerate(labelled):
-        for field_b in labelled[i + 1:]:
-            if _is_swahili_synonym_pair(field_a.label, field_b.label):
-                _create_issue(
-                    affected_field=field_a,
-                    issue_type="SWAHILI_SYNONYM",
-                    severity="WARNING",
-                    description=(
-                        f'"{field_a.label}" appears to be a Swahili translation of '
-                        f'"{field_b.label}" (or vice versa). If they represent the same '
-                        f"attribute, data-entry staff may fill in both."
-                    ),
-                    suggestion=(
-                        "Choose one language for labels consistently, or add qualifiers "
-                        "to make clear that these fields collect different information."
-                    ),
-                    conflicting_field=field_b,
-                )
-
-    # ── Step 9: LABEL_CORE_CONFLICT (WARNING) ─────────────────────
-    for field in fields:
-        if _is_core_conflict(field.label, model_name):
-            _create_issue(
-                affected_field=field,
-                issue_type="LABEL_CORE_CONFLICT",
-                severity="WARNING",
-                description=(
-                    f'"{field.label}" contains a word typically associated with '
-                    f"system-managed core fields (e.g. cooperative, recorded by). "
-                    f"This may confuse data-entry staff."
-                ),
-                suggestion=(
-                    "Use a more specific, cooperative-facing label. "
-                    "Core system fields are already populated automatically."
-                ),
-            )
-
-    # ── Step 10: REDUNDANT_CORE (WARNING) ─────────────────────────
-    for field in fields:
-        if field.maps_to_model_field in auto_populated:
-            _create_issue(
-                affected_field=field,
-                issue_type="REDUNDANT_CORE",
-                severity="WARNING",
-                description=(
-                    f'"{field.label}" maps to the field "{field.maps_to_model_field}" '
-                    f"which is automatically populated by the system. "
-                    f"Adding it to the form asks users to enter data the system already knows."
-                ),
-                suggestion=(
-                    f'Remove this field from the form, or move "{field.maps_to_model_field}" '
-                    f"to the template's field_defaults instead."
-                ),
-            )
-
-    # ── Step 11: NUMERIC_UNIT_AMBIGUITY (WARNING) ──────────────────
-    numeric_display_types = {"number", "decimal"}
-    numeric_django_types  = {
-        "IntegerField", "BigIntegerField", "PositiveIntegerField",
-        "PositiveSmallIntegerField", "SmallIntegerField",
-        "DecimalField", "FloatField",
+    already = {
+        (
+            ex.issue_type,
+            str(ex.affected_field_id) if ex.affected_field_id else None,
+            str(ex.conflicting_field_id) if ex.conflicting_field_id else None,
+        )
+        for ex in existing
+        if str(ex.id) in keep_ids
     }
-    numeric_form_fields = [
-        f for f in fields
-        if f.display_type in numeric_display_types
-        or model_fields_info.get(f.maps_to_model_field, {}).get("django_type") in numeric_django_types
-    ]
-    if len(numeric_form_fields) >= 2:
-        for field in numeric_form_fields:
-            if not _has_numeric_unit(field.label):
-                _create_issue(
-                    affected_field=field,
-                    issue_type="NUMERIC_UNIT_AMBIGUITY",
-                    severity="WARNING",
-                    description=(
-                        f'The numeric field "{field.label}" does not include a measurement '
-                        f"unit in its label. When there are multiple numeric fields, "
-                        f"staff may enter values in the wrong unit."
-                    ),
-                    suggestion=(
-                        f'Include the unit in the label, e.g. '
-                        f'"{field.label} (kg)" or "{field.label} (KES)".'
-                    ),
-                )
 
-    # ── Step 12: Update template state ───────────────────────────
-    has_blocking = FormFieldSemanticIssue.objects.filter(
-        template=template,
-        severity="ERROR",
-        is_acknowledged=False,
-    ).exists()
+    for issue in new_issues:
+        if _issue_signature(issue) in already:
+            continue
 
-    template.has_blocking_errors = has_blocking
-    template.status = (
-        "HAS_ISSUES" if has_blocking else
-        ("DRAFT" if issues_created else "DRAFT")
-    )
+        affected = None
+        if issue.get("affected_field_id"):
+            try:
+                affected = FormField.objects.get(pk=issue["affected_field_id"])
+            except FormField.DoesNotExist:
+                continue
+
+        if affected is None and issue["issue_type"] != "MISSING_REQUIRED":
+            continue
+
+        conflicting = None
+        if issue.get("conflicting_field_id"):
+            try:
+                conflicting = FormField.objects.get(pk=issue["conflicting_field_id"])
+            except FormField.DoesNotExist:
+                pass
+
+        FormFieldSemanticIssue.objects.create(
+            template=template,
+            affected_field=affected,
+            conflicting_field=conflicting,
+            issue_type=issue["issue_type"],
+            severity=issue["severity"],
+            description=issue["description"],
+            suggestion=issue.get("suggestion", ""),
+        )
+
+    any_errors = template.semantic_issues.filter(severity="ERROR").exists()
+    template.has_blocking_errors = any_errors
+    if any_errors:
+        template.status = FormTemplate.Status.HAS_ISSUES
+    elif template.status in (
+        FormTemplate.Status.VALIDATING,
+        FormTemplate.Status.HAS_ISSUES,
+    ):
+        template.status = FormTemplate.Status.DRAFT
+
     template.save(update_fields=["has_blocking_errors", "status"])
 
-    logger.info(
-        "Semantic validation complete | template=%s | issues=%d | blocking=%s",
-        template.name,
-        len(issues_created),
-        has_blocking,
-    )
-    return issues_created
 
-
-def can_activate_template(template) -> Tuple[bool, List[str]]:
+def refresh_template_semantic_state(template):
     """
-    Check whether a template can be activated.
-    Returns (can_activate: bool, blocking_reasons: List[str]).
+    Recompute and persist the semantic state for one template.
+
+    Returns the freshly calculated issue dicts for callers that want to use
+    them immediately without re-running validation.
     """
-    from core.models import FormFieldSemanticIssue
-
-    blocking_issues = FormFieldSemanticIssue.objects.filter(
-        template=template,
-        severity="ERROR",
-        is_acknowledged=False,
-    )
-
-    reasons = [issue.description for issue in blocking_issues]
-    return (len(reasons) == 0), reasons
-
-
-def activate_template(template, activated_by) -> bool:
-    """
-    Activate a FormTemplate after checking for blocking issues.
-    Deactivates any previous active template for the same
-    (cooperative, target_model) pair if this is set as default.
-    Returns True on success, raises ValueError on blocking errors.
-    """
-    from core.models import FormTemplate
-
-    can_activate, reasons = can_activate_template(template)
-    if not can_activate:
-        raise ValueError(
-            f"Template cannot be activated. Resolve {len(reasons)} blocking error(s) first: "
-            + "; ".join(reasons[:3])
-            + ("..." if len(reasons) > 3 else "")
-        )
-
-    # Deactivate previous default for this (cooperative, target_model)
-    if template.is_default:
-        FormTemplate.objects.filter(
-            cooperative=template.cooperative,
-            target_model=template.target_model,
-            is_default=True,
-            status="ACTIVE",
-        ).exclude(pk=template.pk).update(
-            status="INACTIVE",
-            is_default=False,
-        )
-
-    template.status = "ACTIVE"
-    template.save(update_fields=["status"])
-    logger.info("Template activated | %s by %s", template.name, activated_by.email)
-    return True
+    raw_issues = run_semantic_validation(template)
+    persist_semantic_issues(template, raw_issues)
+    return raw_issues

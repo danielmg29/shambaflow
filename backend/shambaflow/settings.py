@@ -131,23 +131,54 @@ TEMPLATES = [
     },
 ]
 
+def _is_neon_host(host: str | None) -> bool:
+    return bool(host and "neon.tech" in host)
+
+
+def _apply_database_defaults(config: dict) -> dict:
+    options = dict(config.get('OPTIONS') or {})
+    host = str(config.get('HOST') or '')
+
+    config['CONN_MAX_AGE'] = config.get('CONN_MAX_AGE', 60)
+    config['CONN_HEALTH_CHECKS'] = True
+
+    if _is_neon_host(host):
+        options.setdefault('sslmode', 'require')
+        options.setdefault('connect_timeout', 10)
+        options.setdefault('keepalives', 1)
+        options.setdefault('keepalives_idle', 30)
+        options.setdefault('keepalives_interval', 10)
+        options.setdefault('keepalives_count', 5)
+        options.setdefault('options', '-c statement_timeout=30000')
+
+    config['OPTIONS'] = options
+    return config
+
+
+def _database_from_url(url: str | None) -> dict:
+    parsed = urlparse(url or "")
+    config = {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': parsed.path.replace('/', ''),
+        'USER': parsed.username,
+        'PASSWORD': parsed.password,
+        'HOST': parsed.hostname,
+        'PORT': parsed.port or 5432,
+        'OPTIONS': dict(parse_qsl(parsed.query)),
+    }
+    return _apply_database_defaults(config)
+
+
 # ─────────────────────────────────────────
 # DATABASE — SQLite for local development
 # Comment this out and use Neon config below for production
 # ─────────────────────────────────────────
-# Replace the DATABASES section of your settings.py with this
-tmpPostgres = urlparse(os.getenv("DATABASE_URL"))
+DATABASE_URL = env('DATABASE_URL', default='')
+DATABASE_URL_UNPOOLED = env('DATABASE_URL_UNPOOLED', default=None)
+ACTIVE_DATABASE_URL = DATABASE_URL_UNPOOLED if DEBUG and DATABASE_URL_UNPOOLED else DATABASE_URL
 
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': tmpPostgres.path.replace('/', ''),
-        'USER': tmpPostgres.username,
-        'PASSWORD': tmpPostgres.password,
-        'HOST': tmpPostgres.hostname,
-        'PORT': 5432,
-        'OPTIONS': dict(parse_qsl(tmpPostgres.query)),
-    }
+    'default': _database_from_url(ACTIVE_DATABASE_URL)
 }
 
 # ─────────────────────────────────────────
@@ -178,16 +209,27 @@ DATABASES = {
 # }
 
 # Allow DATABASE_URL override (used in Docker / CI)
-import dj_database_url
-NEON_DATABASE_URL = env('NEON_DATABASE_URL', default=None)
-if NEON_DATABASE_URL:
-    DATABASES['default'] = dj_database_url.parse(
-        NEON_DATABASE_URL,
-        conn_max_age=60,
-        conn_health_checks=True,
-        ssl_require=True,
-    )
+# Add these at the top of your settings.py
+import os
+from dotenv import load_dotenv
+from urllib.parse import urlparse, parse_qsl
 
+load_dotenv()
+
+# Replace the DATABASES section of your settings.py with this
+tmpPostgres = urlparse(os.getenv("DATABASE_URL"))
+
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': tmpPostgres.path.replace('/', ''),
+        'USER': tmpPostgres.username,
+        'PASSWORD': tmpPostgres.password,
+        'HOST': tmpPostgres.hostname,
+        'PORT': 5432,
+        'OPTIONS': dict(parse_qsl(tmpPostgres.query)),
+    }
+}
 # ─────────────────────────────────────────
 # CACHE — Upstash Redis
 # Disabled for development - enable in production with Redis
@@ -243,7 +285,11 @@ SESSION_ENGINE = 'django.contrib.sessions.backends.db'
 #         },
 #     },
 # }
-
+# Disable Django's automatic slash-append redirect.
+# All API endpoints explicitly declare trailing slashes in urls.py.
+# Without this, POST requests to a URL missing a trailing slash cause a 500
+# because Django cannot redirect a POST while preserving its body.
+APPEND_SLASH = False
 # ─────────────────────────────────────────
 # AUTHENTICATION — Custom User Model
 # ─────────────────────────────────────────
@@ -299,6 +345,7 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_PAGINATION_CLASS': 'core.pagination.StandardResultsPagination',
     'PAGE_SIZE': 50,
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'DEFAULT_THROTTLE_CLASSES': [
         'rest_framework.throttling.AnonRateThrottle',
         'rest_framework.throttling.UserRateThrottle',

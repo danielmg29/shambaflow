@@ -21,6 +21,7 @@
  */
 
 import Image from "next/image";
+import { cn } from "@/lib/utils";
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -126,7 +127,7 @@ export function ShambaLogo({
   if (mode === "icon") {
     return (
       <div
-        className={`flex-shrink-0 ${className ?? ""}`}
+        className={cn("flex shrink-0 items-center justify-center", className)}
         style={{ width: cfg.iconW, height: cfg.iconH }}
       >
         {iconSrc ? (
@@ -135,7 +136,7 @@ export function ShambaLogo({
             alt="ShambaFlow icon"
             width={cfg.iconW}
             height={cfg.iconH}
-            className="object-contain"
+            className="h-full w-full object-contain object-center"
             priority
           />
         ) : (
@@ -149,7 +150,7 @@ export function ShambaLogo({
   if (mode === "full" && fullSrc) {
     return (
       <div
-        className={`flex-shrink-0 ${className ?? ""}`}
+        className={cn("flex shrink-0 items-center justify-center", className)}
         style={{ width: cfg.fullW, height: cfg.fullH }}
       >
         <Image
@@ -157,7 +158,7 @@ export function ShambaLogo({
           alt="ShambaFlow"
           width={cfg.fullW}
           height={cfg.fullH}
-          className="object-contain"
+          className="h-full w-full object-contain object-center"
           priority
         />
       </div>
@@ -166,7 +167,7 @@ export function ShambaLogo({
 
   /* ── Full mode: icon SVG + wordmark (default fallback) ───────────── */
   return (
-    <div className={`flex items-center gap-2.5 ${cfg.height} ${className ?? ""}`}>
+    <div className={cn("flex items-center justify-center gap-2.5", cfg.height, className)}>
       {iconSrc ? (
         <Image
           src={iconSrc}

@@ -66,7 +66,7 @@ export default function MarketplaceLayout({ children }: { children: React.ReactN
   return (
     <div className="flex h-screen overflow-hidden bg-[var(--background)]">
       {/* Desktop Sidebar */}
-      <div className="hidden lg:flex lg:flex-shrink-0">
+      <div className="relative z-30 hidden overflow-visible lg:flex lg:flex-shrink-0">
         <ShambaSidebar
           variant="tender"
           activeId={activeId}
@@ -104,7 +104,7 @@ export default function MarketplaceLayout({ children }: { children: React.ReactN
       </AnimatePresence>
 
       {/* Main content */}
-      <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
+      <div className="relative z-0 flex min-w-0 flex-1 flex-col overflow-hidden">
         <TopBar
           onMenuClick={() => setSidebarOpen(true)}
           variant="marketplace"
