@@ -14,7 +14,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { AnimatePresence, motion } from "framer-motion";
 import { ShambaSidebar } from "@/components/shambaflow/ShambaSidebar";
 import { TopBar } from "@/components/dashboard/TopBar";
-import { getAccessToken, getUser } from "@/lib/api";
+import { getAccessToken, getUser, type UserSnapshot } from "@/lib/api";
 
 export default function MarketplaceLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -26,7 +26,7 @@ export default function MarketplaceLayout({ children }: { children: React.ReactN
   // Auth guard — buyers only
   useEffect(() => {
     const token = getAccessToken();
-    const user  = getUser() as Record<string, string> | null;
+    const user  = getUser() as UserSnapshot | null;
     if (!token) { router.replace("/login"); return; }
     if (user?.user_type !== "BUYER") {
       const coopId = user?.cooperative_id;
@@ -52,7 +52,7 @@ export default function MarketplaceLayout({ children }: { children: React.ReactN
     return "dashboard";
   })();
 
-  const user        = mounted ? (getUser() as Record<string, string> | null) : null;
+  const user        = mounted ? (getUser() as UserSnapshot | null) : null;
   const companyName = user?.company_name ?? "Your Company";
 
   if (!mounted) {

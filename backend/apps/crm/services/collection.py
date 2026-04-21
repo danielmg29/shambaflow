@@ -30,11 +30,13 @@ from typing import Any, Iterable
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape as xml_escape
 
+from django.conf import settings
 from django.core.paginator import Paginator
 from django.db import models
 from django.http import HttpResponse
 
 from core.models import (
+    CapacitySnapshot,
     Cooperative,
     FinancialRecord,
     FormTemplate,
@@ -46,6 +48,7 @@ from core.models import (
     ProductionRecord,
     RolePermission,
     User,
+    VerificationDocument,
 )
 from core.services.field_registry import get_field_schema, validate_custom_payload
 from core.services.form_submission import _coerce_custom_value, _coerce_value
@@ -102,6 +105,25 @@ MODEL_CATEGORICAL_HINTS: dict[str, tuple[str, ...]] = {
 }
 
 GENERIC_NUMERIC_HINTS = ("amount", "value", "quantity", "count", "size", "total")
+COOPERATIVE_DASHBOARD_RECENT_LIMIT = 4
+COOPERATIVE_DASHBOARD_LABELS = {
+    "members": "Member Record",
+    "land": "Land Record",
+    "herds": "Herd Record",
+    "production": "Production Record",
+    "livestock": "Livestock Log",
+    "governance": "Governance Record",
+    "finance": "Financial Record",
+}
+WORKSPACE_MODULE_LABELS = {
+    "members": "Members",
+    "land": "Land Records",
+    "herds": "Herd Records",
+    "production": "Production",
+    "livestock": "Livestock Health",
+    "governance": "Governance",
+    "finance": "Finance",
+}
 
 
 @dataclass(frozen=True)
@@ -1061,6 +1083,29 @@ def _parse_dateish(value: Any) -> date | None:
         return None
 
 
+def _parse_datetimeish(value: Any) -> datetime | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime.combine(value, datetime.min.time())
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        pass
+
+    parsed_date = _parse_dateish(text)
+    if parsed_date is None:
+        return None
+    return datetime.combine(parsed_date, datetime.min.time())
+
+
 def _parse_numeric(value: Any) -> float | None:
     if value in (None, ""):
         return None
@@ -1106,6 +1151,12 @@ def _format_number(value: float | int | Decimal) -> str:
 
 def _format_date(value: date | None) -> str:
     return value.strftime("%d %b %Y") if value else "—"
+
+
+def _format_datetime(value: datetime | None) -> str:
+    if value is None:
+        return "—"
+    return value.strftime("%d %b %Y · %H:%M")
 
 
 def _choice_label_lookup(config: CRMModelConfig) -> dict[str, dict[str, str]]:
@@ -2126,6 +2177,614 @@ def get_member_dashboard_payload(cooperative: Cooperative, member: Member, user:
             permissions=permissions,
             field_preferences=field_preferences,
         ),
+        "permissions": permissions,
+    }
+
+
+def _dashboard_score(value: Any) -> int:
+    numeric = _parse_numeric(value)
+    if numeric is None:
+        return 0
+    return max(0, min(100, int(round(numeric))))
+
+
+def _cooperative_dashboard_member_label(record: dict[str, Any], model_slug: str) -> str:
+    if model_slug == "members":
+        label = record.get("display_name")
+    else:
+        label = record.get("member_name") or record.get("member_number")
+    normalized = _normalize_scalar(label).strip()
+    return normalized or "Cooperative"
+
+
+def _cooperative_workspace_permissions(user: User, cooperative: Cooperative) -> dict[str, dict[str, bool]]:
+    return {
+        slug: get_model_permission_snapshot(user, cooperative, slug)
+        for slug in CRM_MODEL_CONFIG
+    }
+
+
+def _assert_workspace_access(permissions: dict[str, dict[str, bool]]) -> None:
+    if not any(snapshot.get("can_view") for snapshot in permissions.values()):
+        raise PermissionError("Permission denied.")
+
+
+def _submission_scope(record: dict[str, Any], config: CRMModelConfig) -> str:
+    if config.slug == "members":
+        return SCOPE_MEMBER
+    if config.member_binding in {"self", "fk"}:
+        return SCOPE_MEMBER
+    if config.member_binding == "extra":
+        raw_scope = _normalize_scalar(record.get("collection_scope")).strip().upper()
+        if raw_scope in {SCOPE_MEMBER, SCOPE_COOPERATIVE}:
+            return raw_scope
+        if record.get("member_id") or record.get("member_number"):
+            return SCOPE_MEMBER
+    return SCOPE_COOPERATIVE
+
+
+def _submission_title_fields(cooperative: Cooperative) -> dict[str, str | None]:
+    preferences = _member_dashboard_field_preferences(cooperative)
+    title_fields = {
+        slug: values.get("title_field")
+        for slug, values in preferences.items()
+    }
+    title_fields.setdefault("members", "display_name")
+    return title_fields
+
+
+def _submission_items(
+    cooperative: Cooperative,
+    *,
+    permissions: dict[str, dict[str, bool]],
+    search: str = "",
+    model_slug: str | None = None,
+) -> list[dict[str, Any]]:
+    title_fields = _submission_title_fields(cooperative)
+    selected_slugs = [model_slug] if model_slug else list(CRM_MODEL_CONFIG.keys())
+    items: list[dict[str, Any]] = []
+
+    for slug in selected_slugs:
+        if slug not in CRM_MODEL_CONFIG or not permissions.get(slug, {}).get("can_view"):
+            continue
+
+        config = get_crm_config(slug)
+        queryset = _base_queryset(cooperative, config).order_by(*config.default_order)
+        for instance in queryset:
+            record = serialize_record(instance, config)
+            if search and not _record_matches(record, {}, search):
+                continue
+
+            member_id = record["id"] if slug == "members" else record.get("member_id")
+            item = {
+                "id": str(record["id"]),
+                "model_slug": slug,
+                "module_label": WORKSPACE_MODULE_LABELS.get(slug, _humanize_value(slug)),
+                "type": COOPERATIVE_DASHBOARD_LABELS.get(slug, config.model._meta.verbose_name.title()),
+                "title": _dashboard_record_title(record, slug, title_fields.get(slug)),
+                "member": _cooperative_dashboard_member_label(record, slug),
+                "member_id": str(member_id) if member_id else None,
+                "submitted_at": record.get("created_at"),
+                "collection_scope": _submission_scope(record, config),
+                "route": f"/crm/{cooperative.id}/{slug}",
+            }
+            if item["member_id"]:
+                item["member_route"] = f"/crm/{cooperative.id}/members/{item['member_id']}"
+            items.append(item)
+
+    items.sort(
+        key=lambda item: _parse_datetimeish(item.get("submitted_at")) or datetime.min,
+        reverse=True,
+    )
+    return items
+
+
+def _submissions_timeline_chart(items: list[dict[str, Any]]) -> dict[str, Any] | None:
+    timeline_dates = [
+        parsed.date()
+        for parsed in (_parse_datetimeish(item.get("submitted_at")) for item in items)
+        if parsed is not None
+    ]
+    if not timeline_dates:
+        return None
+
+    end_month = _month_start(max(timeline_dates))
+    month_starts = [
+        _shift_month(end_month, offset)
+        for offset in range(-(ANALYTICS_TIMELINE_MONTHS - 1), 1)
+    ]
+    counts = {month: 0 for month in month_starts}
+
+    for timeline_date in timeline_dates:
+        month = _month_start(timeline_date)
+        if month in counts:
+            counts[month] += 1
+
+    return {
+        "id": "submission_timeline",
+        "type": "timeline",
+        "title": "Submission activity",
+        "description": "All CRM submissions captured across visible modules over time.",
+        "data": [
+            {"label": month.strftime("%b %Y"), "value": counts[month]}
+            for month in month_starts
+        ],
+    }
+
+
+def _submissions_module_chart(items: list[dict[str, Any]]) -> dict[str, Any] | None:
+    counts: dict[str, int] = {}
+    for item in items:
+        counts[item["module_label"]] = counts.get(item["module_label"], 0) + 1
+
+    if not counts:
+        return None
+
+    ranked = sorted(counts.items(), key=lambda entry: (-entry[1], entry[0]))[:ANALYTICS_BREAKDOWN_LIMIT]
+    return {
+        "id": "submission_modules",
+        "type": "bar",
+        "title": "Submissions by module",
+        "description": "Where cooperative activity is being captured most often.",
+        "data": [{"label": label, "value": value} for label, value in ranked],
+    }
+
+
+def _count_active_cycles(cooperative: Cooperative) -> int:
+    cycles: set[str] = set()
+    has_records = False
+
+    for extra_data in ProductionRecord.objects.filter(cooperative=cooperative).values_list("extra_data", flat=True):
+        has_records = True
+        payload = extra_data or {}
+        for key in ("season", "cycle"):
+            raw_value = payload.get(key)
+            normalized = _normalize_scalar(raw_value).strip()
+            if normalized:
+                cycles.add(normalized.casefold())
+
+    if cycles:
+        return len(cycles)
+    return 1 if has_records else 0
+
+
+def get_cooperative_recent_submissions(
+    cooperative: Cooperative,
+    *,
+    permissions: dict[str, dict[str, bool]] | None = None,
+    limit: int = COOPERATIVE_DASHBOARD_RECENT_LIMIT,
+) -> list[dict[str, Any]]:
+    permissions = permissions or {
+        slug: {"can_view": True, "can_create": True, "can_edit": True, "can_delete": True}
+        for slug in CRM_MODEL_CONFIG
+    }
+    submissions: list[dict[str, Any]] = []
+
+    for model_slug, config in CRM_MODEL_CONFIG.items():
+        if not permissions.get(model_slug, {}).get("can_view"):
+            continue
+
+        queryset = _base_queryset(cooperative, config).order_by(*config.default_order)[:limit]
+        for instance in queryset:
+            record = serialize_record(instance, config)
+            submissions.append(
+                {
+                    "id": str(record["id"]),
+                    "model_slug": model_slug,
+                    "type": COOPERATIVE_DASHBOARD_LABELS.get(model_slug, config.model._meta.verbose_name.title()),
+                    "member": _cooperative_dashboard_member_label(record, model_slug),
+                    "submitted_at": record.get("created_at"),
+                }
+            )
+
+    submissions.sort(
+        key=lambda item: _parse_datetimeish(item.get("submitted_at")) or datetime.min,
+        reverse=True,
+    )
+    return submissions[:limit]
+
+
+def get_cooperative_submissions_workspace(
+    cooperative: Cooperative,
+    user: User,
+    *,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    search: str = "",
+    model_slug: str | None = None,
+) -> dict[str, Any]:
+    permissions = _cooperative_workspace_permissions(user, cooperative)
+    _assert_workspace_access(permissions)
+
+    all_items = _submission_items(
+        cooperative,
+        permissions=permissions,
+        search=search,
+        model_slug=model_slug,
+    )
+    paginated = _paginate_list(all_items, page, page_size)
+    module_counts: dict[str, int] = {}
+    for item in all_items:
+        module_counts[item["model_slug"]] = module_counts.get(item["model_slug"], 0) + 1
+
+    latest_submission_at = _parse_datetimeish(all_items[0]["submitted_at"]) if all_items else None
+    current_month = _month_start(date.today())
+    this_month_count = sum(
+        1
+        for item in all_items
+        if (parsed := _parse_datetimeish(item.get("submitted_at"))) is not None
+        and _month_start(parsed.date()) == current_month
+    )
+    member_scoped_count = sum(1 for item in all_items if item["collection_scope"] == SCOPE_MEMBER)
+    cooperative_scoped_count = len(all_items) - member_scoped_count
+    ranked_modules = sorted(module_counts.items(), key=lambda entry: (-entry[1], entry[0]))
+    top_module = ranked_modules[0] if ranked_modules else None
+
+    paginated.update(
+        {
+            "filters": {
+                "search": search,
+                "model_slug": model_slug,
+            },
+            "cards": [
+                {
+                    "id": "total_submissions",
+                    "label": "Total Submissions",
+                    "value": _format_number(len(all_items)),
+                    "helper_text": "Across all visible CRM modules.",
+                    "tone": "primary",
+                },
+                {
+                    "id": "submissions_this_month",
+                    "label": "This Month",
+                    "value": _format_number(this_month_count),
+                    "helper_text": "Submissions captured in the current month.",
+                    "tone": "default",
+                },
+                {
+                    "id": "member_scoped_submissions",
+                    "label": "Member Linked",
+                    "value": _format_number(member_scoped_count),
+                    "helper_text": "Entries tied directly to a member profile.",
+                    "tone": "accent",
+                },
+                {
+                    "id": "active_submission_modules",
+                    "label": "Active Modules",
+                    "value": _format_number(len(module_counts)),
+                    "helper_text": "Modules contributing data to this activity feed.",
+                    "tone": "default",
+                },
+            ],
+            "charts": [
+                chart
+                for chart in (
+                    _submissions_timeline_chart(all_items),
+                    _submissions_module_chart(all_items),
+                )
+                if chart is not None
+            ],
+            "highlights": [
+                {
+                    "label": "Latest Submission",
+                    "value": _format_datetime(latest_submission_at),
+                },
+                {
+                    "label": "Top Module",
+                    "value": (
+                        f"{WORKSPACE_MODULE_LABELS.get(top_module[0], _humanize_value(top_module[0]))} ({top_module[1]})"
+                        if top_module else "No submissions yet"
+                    ),
+                },
+                {
+                    "label": "Cooperative Scope",
+                    "value": f"{_format_number(cooperative_scoped_count)} entries",
+                },
+                {
+                    "label": "Visible Modules",
+                    "value": ", ".join(
+                        WORKSPACE_MODULE_LABELS.get(slug, _humanize_value(slug))
+                        for slug, count in ranked_modules[:3]
+                        if count > 0
+                    ) or "No active modules",
+                },
+            ],
+            "module_options": [
+                {
+                    "value": slug,
+                    "label": WORKSPACE_MODULE_LABELS.get(slug, _humanize_value(slug)),
+                    "count": module_counts.get(slug, 0),
+                }
+                for slug in CRM_MODEL_CONFIG
+                if permissions.get(slug, {}).get("can_view")
+            ],
+            "permissions": permissions,
+        }
+    )
+    return paginated
+
+
+def get_cooperative_dashboard_payload(cooperative: Cooperative, user: User) -> dict[str, Any]:
+    permissions = {
+        slug: get_model_permission_snapshot(user, cooperative, slug)
+        for slug in CRM_MODEL_CONFIG
+    }
+    if not any(snapshot.get("can_view") for snapshot in permissions.values()):
+        raise PermissionError("Permission denied.")
+
+    try:
+        capacity_metric = cooperative.capacity_metric
+    except Exception:
+        capacity_metric = None
+
+    return {
+        "member_count": Member.objects.filter(cooperative=cooperative).count()
+        if permissions["members"]["can_view"]
+        else 0,
+        "active_cycles": _count_active_cycles(cooperative)
+        if permissions["production"]["can_view"]
+        else 0,
+        "capacity_index": _dashboard_score(
+            getattr(capacity_metric, "overall_index", 0)
+        ),
+        "data_completeness": _dashboard_score(
+            getattr(capacity_metric, "data_completeness_score", 0)
+        ),
+        "member_engagement": _dashboard_score(
+            getattr(capacity_metric, "governance_participation_score", 0)
+        ),
+        "production_regularity": _dashboard_score(
+            getattr(capacity_metric, "production_consistency_score", 0)
+        ),
+        "is_verified": cooperative.is_verified,
+        "tender_eligible": bool(getattr(capacity_metric, "is_premium_eligible", False)),
+        "recent_submissions": get_cooperative_recent_submissions(
+            cooperative,
+            permissions=permissions,
+        ),
+        "permissions": permissions,
+    }
+
+
+def _capacity_trend_chart(
+    cooperative: Cooperative,
+    *,
+    current_score: int,
+    current_date: date | None,
+) -> dict[str, Any]:
+    snapshots = (
+        CapacitySnapshot.objects
+        .filter(cooperative=cooperative)
+        .order_by("snapshot_date", "created_at")
+    )
+    monthly_points: dict[date, int] = {}
+    for snapshot in snapshots:
+        monthly_points[_month_start(snapshot.snapshot_date)] = _dashboard_score(snapshot.overall_index)
+
+    if not monthly_points and current_date is not None:
+        monthly_points[_month_start(current_date)] = current_score
+
+    ordered = sorted(monthly_points.items())[-ANALYTICS_TIMELINE_MONTHS:]
+    return {
+        "id": "capacity_trend",
+        "type": "line",
+        "title": "Capacity index trend",
+        "description": "Historical capacity snapshots used by the certification layer.",
+        "data": [
+            {"label": month.strftime("%b %Y"), "value": value}
+            for month, value in ordered
+        ],
+    }
+
+
+def _production_trend_chart(cooperative: Cooperative) -> dict[str, Any] | None:
+    records = _analytics_records(cooperative, "production")
+    if not records:
+        return None
+
+    timeline_values = [
+        _parse_dateish(record.get("record_date") or record.get("created_at"))
+        for record in records
+    ]
+    timeline_dates = [item for item in timeline_values if item is not None]
+    if not timeline_dates:
+        return None
+
+    end_month = _month_start(max(timeline_dates))
+    month_starts = [
+        _shift_month(end_month, offset)
+        for offset in range(-(ANALYTICS_TIMELINE_MONTHS - 1), 1)
+    ]
+    counts = {month: 0 for month in month_starts}
+    for timeline_date in timeline_dates:
+        month = _month_start(timeline_date)
+        if month in counts:
+            counts[month] += 1
+
+    return {
+        "id": "production_trend",
+        "type": "timeline",
+        "title": "Historical production trend",
+        "description": "Production entries captured per month from the CRM.",
+        "data": [
+            {"label": month.strftime("%b %Y"), "value": counts[month]}
+            for month in month_starts
+        ],
+    }
+
+
+def _verification_documents_payload(cooperative: Cooperative) -> dict[str, Any]:
+    documents = list(
+        VerificationDocument.objects
+        .filter(cooperative=cooperative)
+        .order_by("-uploaded_at")
+    )
+    counts = {
+        "PENDING": 0,
+        "APPROVED": 0,
+        "REJECTED": 0,
+        "VERIFIED": 0,
+    }
+    for document in documents:
+        counts[document.status] = counts.get(document.status, 0) + 1
+
+    return {
+        "total": len(documents),
+        "pending": counts.get("PENDING", 0),
+        "approved": counts.get("APPROVED", 0),
+        "rejected": counts.get("REJECTED", 0),
+        "verified": counts.get("VERIFIED", 0),
+        "items": [
+            {
+                "id": str(document.id),
+                "document_type": document.document_type,
+                "document_type_label": document.get_document_type_display(),
+                "status": document.status,
+                "status_label": document.get_status_display(),
+                "uploaded_at": document.uploaded_at.isoformat(),
+                "notes": document.notes,
+                "file_name": document.file_name or document.file.name.rsplit("/", 1)[-1],
+            }
+            for document in documents[:6]
+        ],
+    }
+
+
+def _verification_document_chart(documents: dict[str, Any]) -> dict[str, Any] | None:
+    breakdown = [
+        ("Pending", documents["pending"]),
+        ("Approved", documents["approved"]),
+        ("Rejected", documents["rejected"]),
+        ("Verified", documents["verified"]),
+    ]
+    if not any(value for _, value in breakdown):
+        return None
+
+    return {
+        "id": "verification_documents",
+        "type": "bar",
+        "title": "Verification document status",
+        "description": "Uploaded compliance documents grouped by review outcome.",
+        "data": [{"label": label, "value": value} for label, value in breakdown],
+    }
+
+
+def get_cooperative_certification_workspace(cooperative: Cooperative, user: User) -> dict[str, Any]:
+    permissions = _cooperative_workspace_permissions(user, cooperative)
+    _assert_workspace_access(permissions)
+
+    try:
+        capacity_metric = cooperative.capacity_metric
+    except Exception:
+        capacity_metric = None
+
+    threshold = int(settings.SHAMBAFLOW.get("MIN_CAPACITY_INDEX_FOR_PREMIUM", 60))
+    weights = settings.SHAMBAFLOW.get("CAPACITY_WEIGHTS", {})
+    capacity_index = _dashboard_score(getattr(capacity_metric, "overall_index", 0))
+    data_completeness = _dashboard_score(getattr(capacity_metric, "data_completeness_score", 0))
+    production_regularity = _dashboard_score(getattr(capacity_metric, "production_consistency_score", 0))
+    governance_participation = _dashboard_score(getattr(capacity_metric, "governance_participation_score", 0))
+    verification_score = _dashboard_score(getattr(capacity_metric, "verification_score", 0))
+    annual_volume = _parse_numeric(getattr(capacity_metric, "estimated_annual_volume_kg", 0)) or 0
+    last_calculated_at = getattr(capacity_metric, "last_calculated_at", None)
+    is_premium_eligible = bool(getattr(capacity_metric, "is_premium_eligible", False))
+    documents = _verification_documents_payload(cooperative)
+
+    return {
+        "status": {
+            "verification_status": cooperative.verification_status,
+            "verification_status_label": cooperative.get_verification_status_display(),
+            "is_verified": cooperative.is_verified,
+            "is_premium_eligible": is_premium_eligible,
+        },
+        "weights": {
+            "data_completeness": float(weights.get("data_completeness", 0)),
+            "production_consistency": float(weights.get("production_consistency", 0)),
+            "governance_participation": float(weights.get("governance_participation", 0)),
+            "verification_status": float(weights.get("verification_status", 0)),
+            "premium_threshold": threshold,
+        },
+        "scores": {
+            "capacity_index": capacity_index,
+            "data_completeness": data_completeness,
+            "production_regularity": production_regularity,
+            "governance_participation": governance_participation,
+            "verification_score": verification_score,
+            "estimated_annual_volume_kg": annual_volume,
+            "total_members_scored": int(getattr(capacity_metric, "total_members_scored", 0) or 0),
+            "total_production_records": int(getattr(capacity_metric, "total_production_records", 0) or 0),
+            "last_calculated_at": last_calculated_at.isoformat() if last_calculated_at else None,
+        },
+        "cards": [
+            {
+                "id": "capacity_index",
+                "label": "Capacity Index",
+                "value": f"{capacity_index}%",
+                "helper_text": (
+                    "Premium tender ready."
+                    if is_premium_eligible
+                    else f"{max(threshold - capacity_index, 0)} pts to premium eligibility."
+                ),
+                "tone": "primary" if is_premium_eligible else "default",
+            },
+            {
+                "id": "data_completeness",
+                "label": "Data Completeness",
+                "value": f"{data_completeness}%",
+                "helper_text": f"Weight {int(round(float(weights.get('data_completeness', 0)) * 100))}% in the score.",
+                "tone": "accent",
+            },
+            {
+                "id": "verification_status",
+                "label": "Verification Status",
+                "value": cooperative.get_verification_status_display(),
+                "helper_text": (
+                    "Cooperative is verified."
+                    if cooperative.is_verified
+                    else f"{documents['pending']} document(s) awaiting review."
+                ),
+                "tone": "primary" if cooperative.is_verified else "default",
+            },
+            {
+                "id": "annual_volume",
+                "label": "Annual Volume",
+                "value": f"{_format_number(annual_volume)} kg",
+                "helper_text": f"{_format_number(getattr(capacity_metric, 'total_production_records', 0) or 0)} production records analysed.",
+                "tone": "default",
+            },
+        ],
+        "charts": [
+            chart
+            for chart in (
+                _capacity_trend_chart(
+                    cooperative,
+                    current_score=capacity_index,
+                    current_date=(last_calculated_at.date() if last_calculated_at else date.today()),
+                ),
+                _production_trend_chart(cooperative),
+                _verification_document_chart(documents),
+            )
+            if chart is not None
+        ],
+        "highlights": [
+            {
+                "label": "Production Regularity",
+                "value": f"{production_regularity}%",
+            },
+            {
+                "label": "Governance Participation",
+                "value": f"{governance_participation}%",
+            },
+            {
+                "label": "Verification Contribution",
+                "value": f"{verification_score}%",
+            },
+            {
+                "label": "Last Recalculated",
+                "value": _format_datetime(last_calculated_at),
+            },
+        ],
+        "documents": documents,
         "permissions": permissions,
     }
 

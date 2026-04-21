@@ -10,25 +10,24 @@
  * Responsive: collapses gracefully on mobile.
  */
 
-import { useState, useRef, useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   Menu, Bell, LogOut, User, Settings, ChevronDown,
-  X, CheckCircle, Sprout, Building2,
+  Sprout, Building2,
 } from "lucide-react";
 import { ThemeToggle } from "@/components/providers/ThemeToggle";
-import { authApi, clearTokens, getUser, getRefreshToken, type UserSnapshot } from "@/lib/api";
+import {
+  USER_UPDATED_EVENT,
+  authApi,
+  clearTokens,
+  getUser,
+  getRefreshToken,
+  type UserSnapshot,
+} from "@/lib/api";
+import { type NotificationItem, useNotifications } from "@/hooks/useNotifications";
 import { cn } from "@/lib/utils";
-
-interface Notification {
-  id: string;
-  title: string;
-  message: string;
-  time: string;
-  read: boolean;
-  type: "info" | "success" | "warning";
-}
 
 interface TopBarProps {
   onMenuClick: () => void;
@@ -37,54 +36,114 @@ interface TopBarProps {
   cooperativeId?: string;
 }
 
-// Demo notifications — in production these would come from the API
-const DEMO_NOTIFICATIONS: Notification[] = [
-  {
-    id: "1",
-    title: "New tender match",
-    message: "A buyer posted a tender matching your cooperative's capacity.",
-    time: "2m ago",
-    read: false,
-    type: "info",
-  },
-  {
-    id: "2",
-    title: "Verification approved",
-    message: "Your cooperative documents have been verified.",
-    time: "1h ago",
-    read: false,
-    type: "success",
-  },
-  {
-    id: "3",
-    title: "Capacity score updated",
-    message: "Your capacity index has been recalculated based on recent data.",
-    time: "3h ago",
-    read: true,
-    type: "info",
-  },
-];
+function formatRelativeTime(timestamp: string): string {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "Just now";
+
+  const diffMs = date.getTime() - Date.now();
+  const absSeconds = Math.round(Math.abs(diffMs) / 1000);
+  const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+
+  if (absSeconds < 60) return rtf.format(Math.round(diffMs / 1000), "second");
+  if (absSeconds < 3600) return rtf.format(Math.round(diffMs / (1000 * 60)), "minute");
+  if (absSeconds < 86400) return rtf.format(Math.round(diffMs / (1000 * 60 * 60)), "hour");
+  return rtf.format(Math.round(diffMs / (1000 * 60 * 60 * 24)), "day");
+}
+
+function notificationAccent(notification: NotificationItem): string {
+  if (notification.priority === "CRITICAL" || notification.priority === "HIGH") {
+    return "bg-amber-500";
+  }
+  if (notification.category === "VERIFICATION") {
+    return "bg-emerald-500";
+  }
+  return "bg-[var(--primary)]";
+}
+
+function getUserInitials(user: UserSnapshot | null): string {
+  const firstName = user?.first_name?.trim() ?? "";
+  const lastName = user?.last_name?.trim() ?? "";
+  if (firstName || lastName) {
+    return `${firstName.charAt(0)}${lastName.charAt(0)}`.toUpperCase() || "U";
+  }
+
+  const fullName = user?.full_name?.trim() ?? "";
+  if (fullName) {
+    const parts = fullName.split(/\s+/).filter(Boolean);
+    const first = parts[0]?.charAt(0) ?? "";
+    const second = parts[1]?.charAt(0) ?? parts[0]?.charAt(1) ?? "";
+    return `${first}${second}`.toUpperCase() || "U";
+  }
+
+  return user?.email?.charAt(0).toUpperCase() ?? "U";
+}
+
+function Avatar({
+  src,
+  initials,
+  className,
+  textClassName,
+}: {
+  src?: string | null;
+  initials: string;
+  className: string;
+  textClassName?: string;
+}) {
+  if (src) {
+    return (
+      <div className={cn("overflow-hidden", className)}>
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={src} alt="Profile" className="h-full w-full object-cover" />
+      </div>
+    );
+  }
+
+  return (
+    <div className={cn("bg-[var(--primary)] text-white flex items-center justify-center", className, textClassName)}>
+      {initials}
+    </div>
+  );
+}
 
 export function TopBar({ onMenuClick, title, variant = "crm", cooperativeId }: TopBarProps) {
   const router = useRouter();
   const [user, setUser] = useState<UserSnapshot | null>(null);
-  const [mounted, setMounted] = useState(false);
 
   const [notifOpen, setNotifOpen] = useState(false);
   const [userOpen, setUserOpen]  = useState(false);
-  const [notifs, setNotifs]       = useState(DEMO_NOTIFICATIONS);
   const [loggingOut, setLoggingOut] = useState(false);
+  const {
+    items: notifs,
+    unreadCount,
+    loading: notificationsLoading,
+    refreshing: notificationsRefreshing,
+    refresh: refreshNotifications,
+    markRead,
+    markAllRead,
+  } = useNotifications(8);
 
   const notifRef = useRef<HTMLDivElement>(null);
   const userRef  = useRef<HTMLDivElement>(null);
 
   // Initialize user data only on client side
   useEffect(() => {
-    setMounted(true);
-    setUser(getUser());
+    const syncUser = () => setUser(getUser());
+    syncUser();
+
+    window.addEventListener(USER_UPDATED_EVENT, syncUser);
+    window.addEventListener("storage", syncUser);
+
+    return () => {
+      window.removeEventListener(USER_UPDATED_EVENT, syncUser);
+      window.removeEventListener("storage", syncUser);
+    };
   }, []);
 
-  const unreadCount = notifs.filter((n) => !n.read).length;
+  useEffect(() => {
+    if (notifOpen) {
+      void refreshNotifications();
+    }
+  }, [notifOpen, refreshNotifications]);
 
   // Close dropdowns on outside click
   useEffect(() => {
@@ -100,10 +159,6 @@ export function TopBar({ onMenuClick, title, variant = "crm", cooperativeId }: T
     return () => document.removeEventListener("mousedown", handleClick);
   }, []);
 
-  const handleMarkAllRead = () => {
-    setNotifs((n) => n.map((notif) => ({ ...notif, read: true })));
-  };
-
   const handleLogout = async () => {
     setLoggingOut(true);
     try {
@@ -117,18 +172,39 @@ export function TopBar({ onMenuClick, title, variant = "crm", cooperativeId }: T
     }
   };
 
-  const initials = user
-    ? `${(user.full_name ?? user.email ?? "U").charAt(0).toUpperCase()}`
-    : "U";
-  const displayName = user?.full_name ?? user?.email ?? "User";
+  const initials = getUserInitials(user);
+  const displayName = user?.full_name
+    || [user?.first_name, user?.last_name].filter(Boolean).join(" ")
+    || user?.email
+    || "User";
   const userType    = user?.user_type ?? "CHAIR";
+  const avatarUrl   = user?.avatar_url ?? null;
 
   const profileHref = variant === "crm"
     ? `/crm/${cooperativeId}/profile`
     : "/marketplace/profile";
   const settingsHref = variant === "crm"
     ? `/crm/${cooperativeId}/settings`
-    : "/marketplace/settings";
+    : "/marketplace/profile";
+  const notificationSettingsHref = variant === "crm"
+    ? `/crm/${cooperativeId}/settings`
+    : "/marketplace/profile";
+
+  const handleNotificationClick = async (notification: NotificationItem) => {
+    if (!notification.is_read) {
+      try {
+        await markRead(notification.id, true);
+      } catch {
+        // Keep navigation working even if the read-state request fails.
+      }
+    }
+
+    setNotifOpen(false);
+
+    if (notification.action_url) {
+      router.push(notification.action_url);
+    }
+  };
 
   return (
     <header
@@ -203,7 +279,7 @@ export function TopBar({ onMenuClick, title, variant = "crm", cooperativeId }: T
                 </span>
                 {unreadCount > 0 && (
                   <button
-                    onClick={handleMarkAllRead}
+                    onClick={() => { void markAllRead(); }}
                     className="text-xs text-[var(--primary)] hover:text-[var(--primary-hover)] transition-colors"
                   >
                     Mark all read
@@ -211,19 +287,29 @@ export function TopBar({ onMenuClick, title, variant = "crm", cooperativeId }: T
                 )}
               </div>
               <div className="max-h-80 overflow-y-auto divide-y divide-[var(--border)]">
-                {notifs.map((n) => (
-                  <div
+                {notificationsLoading && notifs.length === 0 ? (
+                  <div className="px-4 py-6 text-sm text-[var(--foreground-muted)]">
+                    Loading notifications…
+                  </div>
+                ) : notifs.length === 0 ? (
+                  <div className="px-4 py-6 text-sm text-[var(--foreground-muted)]">
+                    No notifications yet.
+                  </div>
+                ) : notifs.map((n) => (
+                  <button
                     key={n.id}
+                    type="button"
+                    onClick={() => { void handleNotificationClick(n); }}
                     className={cn(
-                      "px-4 py-3 transition-colors",
-                      !n.read ? "bg-[var(--primary-light)]/30" : "hover:bg-[var(--background-muted)]"
+                      "block w-full px-4 py-3 text-left transition-colors",
+                      !n.is_read ? "bg-[var(--primary-light)]/30" : "hover:bg-[var(--background-muted)]"
                     )}
                   >
                     <div className="flex items-start gap-3">
                       <div
                         className={cn(
                           "w-2 h-2 rounded-full mt-1.5 shrink-0",
-                          !n.read ? "bg-[var(--primary)]" : "bg-transparent"
+                          !n.is_read ? notificationAccent(n) : "bg-transparent"
                         )}
                       />
                       <div className="flex-1 min-w-0">
@@ -233,16 +319,27 @@ export function TopBar({ onMenuClick, title, variant = "crm", cooperativeId }: T
                         <p className="text-xs text-[var(--foreground-muted)] mt-0.5 leading-relaxed">
                           {n.message}
                         </p>
-                        <p className="text-xs text-[var(--foreground-subtle)] mt-1">{n.time}</p>
+                        <p className="text-xs text-[var(--foreground-subtle)] mt-1">
+                          {formatRelativeTime(n.created_at)}
+                        </p>
                       </div>
                     </div>
-                  </div>
+                  </button>
                 ))}
               </div>
               <div className="px-4 py-2 border-t border-[var(--border)]">
-                <button className="w-full text-center text-xs text-[var(--primary)] hover:text-[var(--primary-hover)] py-1 transition-colors">
-                  View all notifications
-                </button>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-[11px] text-[var(--foreground-subtle)]">
+                    {notificationsRefreshing ? "Refreshing…" : "Synced with your account activity"}
+                  </span>
+                  <Link
+                    href={notificationSettingsHref}
+                    onClick={() => setNotifOpen(false)}
+                    className="text-xs text-[var(--primary)] hover:text-[var(--primary-hover)] py-1 transition-colors"
+                  >
+                    Manage preferences
+                  </Link>
+                </div>
               </div>
             </div>
           )}
@@ -260,12 +357,12 @@ export function TopBar({ onMenuClick, title, variant = "crm", cooperativeId }: T
             aria-label="User menu"
           >
             {/* Avatar */}
-            <div
-              className="w-7 h-7 rounded-full bg-[var(--primary)] text-white
-                         flex items-center justify-center text-xs font-bold shrink-0"
-            >
-              {initials}
-            </div>
+            <Avatar
+              src={avatarUrl}
+              initials={initials}
+              className="w-7 h-7 rounded-full shrink-0"
+              textClassName="text-xs font-bold"
+            />
             <span className="hidden sm:block text-sm font-medium text-[var(--foreground)] max-w-[120px] truncate">
               {displayName.split(" ")[0]}
             </span>
@@ -287,9 +384,12 @@ export function TopBar({ onMenuClick, title, variant = "crm", cooperativeId }: T
               {/* User info header */}
               <div className="px-4 py-3 border-b border-[var(--border)]">
                 <div className="flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-full bg-[var(--primary)] text-white flex items-center justify-center text-sm font-bold">
-                    {initials}
-                  </div>
+                  <Avatar
+                    src={avatarUrl}
+                    initials={initials}
+                    className="w-8 h-8 rounded-full"
+                    textClassName="text-sm font-bold"
+                  />
                   <div className="min-w-0">
                     <p className="text-sm font-medium text-[var(--foreground)] truncate">{displayName}</p>
                     <p className="text-xs text-[var(--foreground-subtle)] flex items-center gap-1 mt-0.5">

@@ -18,13 +18,20 @@ import {
 import { StatCard } from "@/components/shambaflow/StatCard";
 import type { CRMAnalyticsCard, CRMAnalyticsChart, CRMAnalyticsResult, ModelSlug } from "@/hooks/useCRMData";
 
+type AnalyticsPanelMode = ModelSlug | "workspace";
+
 function formatChartValue(value: number): string {
   if (Number.isInteger(value)) return value.toLocaleString();
   return value.toLocaleString(undefined, { maximumFractionDigits: 1 });
 }
 
-function cardIcon(card: CRMAnalyticsCard, modelSlug: ModelSlug) {
+function cardIcon(card: CRMAnalyticsCard, modelSlug: AnalyticsPanelMode) {
   const className = "h-4 w-4";
+  if (card.id.includes("capacity")) return <BarChart3 className={className} />;
+  if (card.id.includes("verification")) return <ShieldCheck className={className} />;
+  if (card.id.includes("submission")) return <CalendarClock className={className} />;
+  if (card.id.includes("volume")) return <Leaf className={className} />;
+  if (card.id.includes("module")) return <BarChart3 className={className} />;
   if (card.id.includes("member")) return <Users className={className} />;
   if (card.id.includes("scope")) return <ShieldCheck className={className} />;
   if (card.id.includes("recent") || card.id.includes("latest") || card.id.includes("activity")) {
@@ -206,7 +213,7 @@ export function ModelAnalyticsPanel({
   error = null,
   onRetry,
 }: {
-  modelSlug: ModelSlug;
+  modelSlug: AnalyticsPanelMode;
   analytics: Pick<CRMAnalyticsResult, "cards" | "charts" | "highlights"> | null;
   loading?: boolean;
   error?: string | null;

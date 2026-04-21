@@ -11,12 +11,15 @@ from django.urls import path
 
 from apps.crm.views.data import (
     crm_analytics_view,
+    crm_certification_view,
     crm_collection_view,
+    crm_dashboard_view,
     crm_detail_view,
     crm_export_view,
     crm_import_template_view,
     crm_import_view,
     crm_schema_view,
+    crm_submissions_view,
 )
 from apps.crm.views.member_dashboard import (
     member_dashboard_view,
@@ -35,6 +38,9 @@ urlpatterns = [
     path("<str:cooperative_id>/members/<uuid:member_id>/records/<str:record_type>/", member_records_view, name="member-records"),
     path("<str:cooperative_id>/members/<uuid:member_id>/form-templates/", member_form_templates_view, name="member-form-templates"),
     path("<str:cooperative_id>/members/<str:pk>/update/", member_form_update_handler, name="member-form-update"),
+    path("<str:cooperative_id>/dashboard/", crm_dashboard_view, name="dashboard"),
+    path("<str:cooperative_id>/submissions/", crm_submissions_view, name="submissions"),
+    path("<str:cooperative_id>/certification/", crm_certification_view, name="certification"),
 
     # Generic CRM schema / import / export
     path("<str:cooperative_id>/<str:model_slug>/schema/", crm_schema_view, name="schema"),

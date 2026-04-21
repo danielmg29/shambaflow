@@ -2454,6 +2454,71 @@ class NotificationPreference(models.Model):
     def __str__(self):
         return f"{self.user.email} – {self.cooperative.name}"
 
+
+class Notification(BaseModel):
+    """Persisted in-app notification rendered in the dashboard notification center."""
+
+    class Category(models.TextChoices):
+        ACCOUNT = "ACCOUNT", "Account"
+        INVITATION = "INVITATION", "Invitation"
+        TENDER = "TENDER", "Tender"
+        BID = "BID", "Bid"
+        VERIFICATION = "VERIFICATION", "Verification"
+        SECURITY = "SECURITY", "Security"
+        SYSTEM = "SYSTEM", "System"
+
+    class Priority(models.TextChoices):
+        LOW = "LOW", "Low"
+        NORMAL = "NORMAL", "Normal"
+        HIGH = "HIGH", "High"
+        CRITICAL = "CRITICAL", "Critical"
+
+    recipient = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="notifications",
+    )
+    cooperative = models.ForeignKey(
+        "Cooperative",
+        on_delete=models.CASCADE,
+        related_name="notifications",
+        null=True,
+        blank=True,
+    )
+    category = models.CharField(
+        max_length=20,
+        choices=Category.choices,
+        default=Category.SYSTEM,
+        db_index=True,
+    )
+    event_type = models.CharField(max_length=60, db_index=True)
+    priority = models.CharField(
+        max_length=10,
+        choices=Priority.choices,
+        default=Priority.NORMAL,
+    )
+    title = models.CharField(max_length=255)
+    message = models.TextField()
+    action_url = models.CharField(max_length=500, blank=True, default="")
+    data = models.JSONField(default=dict, blank=True)
+    delivery_channels = models.JSONField(default=list, blank=True)
+    is_read = models.BooleanField(default=False, db_index=True)
+    read_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "sf_notifications"
+        verbose_name = "Notification"
+        verbose_name_plural = "Notifications"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["recipient", "is_read"]),
+            models.Index(fields=["recipient", "created_at"]),
+            models.Index(fields=["event_type"]),
+        ]
+
+    def __str__(self):
+        return f"{self.recipient.email} — {self.title}"
+
 class VerificationDocument(models.Model):
     """Cooperative verification documents submitted for review."""
 

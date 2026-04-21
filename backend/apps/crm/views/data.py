@@ -24,7 +24,10 @@ from apps.crm.services.collection import (
     build_schema,
     delete_record,
     export_records,
+    get_cooperative_certification_workspace,
     get_cooperative,
+    get_cooperative_dashboard_payload,
+    get_cooperative_submissions_workspace,
     get_model_permission_snapshot,
     get_model_analytics,
     has_crm_permission,
@@ -76,6 +79,60 @@ def _member_context_from_request(cooperative, request) -> Member | None:
 
 def _permission_denied(action: str) -> Response:
     return Response({"error": f"Permission denied: cannot {action}."}, status=403)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def crm_dashboard_view(request, cooperative_id: str):
+    cooperative = get_cooperative(cooperative_id)
+    if not cooperative:
+        return Response({"error": "Cooperative not found."}, status=404)
+
+    try:
+        payload = get_cooperative_dashboard_payload(cooperative, request.user)
+    except PermissionError:
+        return _permission_denied("view this dashboard")
+
+    return Response(payload)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def crm_submissions_view(request, cooperative_id: str):
+    cooperative = get_cooperative(cooperative_id)
+    if not cooperative:
+        return Response({"error": "Cooperative not found."}, status=404)
+
+    page, page_size = _page_params(request)
+
+    try:
+        payload = get_cooperative_submissions_workspace(
+            cooperative,
+            request.user,
+            page=page,
+            page_size=page_size,
+            search=request.query_params.get("search", ""),
+            model_slug=request.query_params.get("model_slug") or None,
+        )
+    except PermissionError:
+        return _permission_denied("view submissions in this workspace")
+
+    return Response(payload)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def crm_certification_view(request, cooperative_id: str):
+    cooperative = get_cooperative(cooperative_id)
+    if not cooperative:
+        return Response({"error": "Cooperative not found."}, status=404)
+
+    try:
+        payload = get_cooperative_certification_workspace(cooperative, request.user)
+    except PermissionError:
+        return _permission_denied("view certification insights")
+
+    return Response(payload)
 
 
 @api_view(["GET"])

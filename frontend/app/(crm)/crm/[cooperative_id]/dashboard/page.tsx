@@ -21,7 +21,7 @@ import {
   Clock, Sprout, ChevronRight,
 } from "lucide-react";
 import { StatCard } from "@/components/shambaflow/StatCard";
-import { apiFetch, getUser } from "@/lib/api";
+import { apiFetch, getUser, type UserSnapshot } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 /* ─── Types ───────────────────────────────────────────────────────── */
@@ -31,6 +31,8 @@ interface DashboardStats {
   active_cycles:       number;
   capacity_index:      number;
   data_completeness:   number;
+  member_engagement:   number;
+  production_regularity: number;
   is_verified:         boolean;
   tender_eligible:     boolean;
   recent_submissions:  RecentSubmission[];
@@ -38,9 +40,50 @@ interface DashboardStats {
 
 interface RecentSubmission {
   id:         string;
+  model_slug: string;
   type:       string;
   member:     string;
-  submitted:  string;
+  submitted_at: string | null;
+}
+
+const EMPTY_DASHBOARD_STATS: DashboardStats = {
+  member_count: 0,
+  active_cycles: 0,
+  capacity_index: 0,
+  data_completeness: 0,
+  member_engagement: 0,
+  production_regularity: 0,
+  is_verified: false,
+  tender_eligible: false,
+  recent_submissions: [],
+};
+
+const RELATIVE_TIME_UNITS: Array<[Intl.RelativeTimeFormatUnit, number]> = [
+  ["year", 60 * 60 * 24 * 365],
+  ["month", 60 * 60 * 24 * 30],
+  ["week", 60 * 60 * 24 * 7],
+  ["day", 60 * 60 * 24],
+  ["hour", 60 * 60],
+  ["minute", 60],
+];
+
+function formatRelativeTime(value: string | null | undefined) {
+  if (!value) return "Recently";
+
+  const timestamp = new Date(value);
+  if (Number.isNaN(timestamp.getTime())) return "Recently";
+
+  const deltaSeconds = Math.round((timestamp.getTime() - Date.now()) / 1000);
+  const absoluteSeconds = Math.abs(deltaSeconds);
+  const formatter = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+
+  for (const [unit, seconds] of RELATIVE_TIME_UNITS) {
+    if (absoluteSeconds >= seconds) {
+      return formatter.format(Math.round(deltaSeconds / seconds), unit);
+    }
+  }
+
+  return formatter.format(deltaSeconds, "second");
 }
 
 /* ─── Skeleton ────────────────────────────────────────────────────── */
@@ -88,7 +131,7 @@ export default function CRMDashboardPage() {
   const params        = useParams();
   const router        = useRouter();
   const cooperativeId = params?.cooperative_id as string | undefined;
-  const user          = getUser() as Record<string, string> | null;
+  const user: UserSnapshot | null = getUser();
   const coopName      = user?.cooperative_name ?? "Your Cooperative";
   const chairName     = user?.full_name ?? "";
 
@@ -98,30 +141,21 @@ export default function CRMDashboardPage() {
 
   useEffect(() => {
     if (!cooperativeId) return;
-    apiFetch<DashboardStats>(`/api/cooperatives/${cooperativeId}/dashboard/`)
+    setLoading(true);
+    setError(null);
+
+    apiFetch<DashboardStats>(`/api/crm/${cooperativeId}/dashboard/`)
       .then(setStats)
-      .catch(() => {
-        // Use demo data if API isn't wired yet
-        setStats({
-          member_count: 142,
-          active_cycles: 3,
-          capacity_index: 78,
-          data_completeness: 84,
-          is_verified: true,
-          tender_eligible: true,
-          recent_submissions: [
-            { id: "1", type: "Production Record", member: "Jane Wanjiru",   submitted: "2 hours ago" },
-            { id: "2", type: "Member Update",     member: "Samuel Kamau",   submitted: "4 hours ago" },
-            { id: "3", type: "Governance Record", member: "Admin",          submitted: "Yesterday"  },
-            { id: "4", type: "Production Record", member: "Aisha Omondi",   submitted: "Yesterday"  },
-          ],
-        });
-        setError(null);
+      .catch((err: unknown) => {
+        setStats(null);
+        setError(err instanceof Error ? err.message : "Failed to load dashboard data.");
       })
       .finally(() => setLoading(false));
   }, [cooperativeId]);
 
   const base = cooperativeId ? `/crm/${cooperativeId}` : "/crm";
+  const displayStats = stats ?? EMPTY_DASHBOARD_STATS;
+  const hasLiveStats = stats !== null;
 
   return (
     <div className="space-y-8">
@@ -138,16 +172,16 @@ export default function CRMDashboardPage() {
         </div>
 
         {/* Verification badge */}
-        {stats && (
+        {hasLiveStats && (
           <div
             className={cn(
               "inline-flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium",
-              stats.is_verified
+              displayStats.is_verified
                 ? "bg-[var(--success-light)] text-[var(--success)] border border-green-200 dark:border-green-900/40"
                 : "bg-[var(--warning-light)] text-[var(--warning)] border border-amber-200 dark:border-amber-900/40"
             )}
           >
-            {stats.is_verified ? (
+            {displayStats.is_verified ? (
               <><CheckCircle2 className="w-4 h-4" /> Verified Cooperative</>
             ) : (
               <><Clock className="w-4 h-4" /> Pending Verification</>
@@ -155,6 +189,13 @@ export default function CRMDashboardPage() {
           </div>
         )}
       </div>
+
+      {error && (
+        <div className="rounded-2xl border border-[var(--warning-light)] bg-[var(--warning-light)]/40 px-4 py-3 text-sm text-[var(--warning)] flex items-start gap-2.5">
+          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+          <span>{error}</span>
+        </div>
+      )}
 
       {/* ── Stats grid ────────────────────────────────────── */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -164,7 +205,7 @@ export default function CRMDashboardPage() {
           <>
             <StatCard
               label="Members"
-              value={stats?.member_count ?? 0}
+              value={displayStats.member_count}
               icon={<Users className="w-5 h-5" />}
               variant="default"
               trend="up"
@@ -173,22 +214,22 @@ export default function CRMDashboardPage() {
             />
             <StatCard
               label="Active Cycles"
-              value={stats?.active_cycles ?? 0}
+              value={displayStats.active_cycles}
               icon={<Leaf className="w-5 h-5" />}
               variant="default"
               onClick={() => router.push(`${base}/production`)}
             />
             <StatCard
               label="Capacity Index"
-              value={`${stats?.capacity_index ?? 0}%`}
+              value={`${displayStats.capacity_index}%`}
               icon={<BarChart3 className="w-5 h-5" />}
-              variant={stats?.capacity_index && stats.capacity_index >= 70 ? "primary" : "default"}
+              variant={displayStats.capacity_index >= 70 ? "primary" : "default"}
               trend="up"
               trendValue="+5 this month"
             />
             <StatCard
               label="Data Score"
-              value={`${stats?.data_completeness ?? 0}%`}
+              value={`${displayStats.data_completeness}%`}
               icon={<ClipboardList className="w-5 h-5" />}
               variant="default"
               onClick={() => router.push(`${base}/forms`)}
@@ -212,11 +253,11 @@ export default function CRMDashboardPage() {
           </div>
 
           {/* Tender eligibility */}
-          {stats && (
+          {hasLiveStats && (
             <div
               className={cn(
                 "rounded-xl border p-4 space-y-2",
-                stats.tender_eligible
+                displayStats.tender_eligible
                   ? "border-[var(--success-light)] bg-[var(--success-light)]/30"
                   : "border-[var(--warning-light)] bg-[var(--warning-light)]/30"
               )}
@@ -225,24 +266,24 @@ export default function CRMDashboardPage() {
                 <ShieldCheck
                   className={cn(
                     "w-4 h-4",
-                    stats.tender_eligible ? "text-[var(--success)]" : "text-[var(--warning)]"
+                    displayStats.tender_eligible ? "text-[var(--success)]" : "text-[var(--warning)]"
                   )}
                 />
                 <span
                   className={cn(
                     "text-sm font-semibold",
-                    stats.tender_eligible ? "text-[var(--success)]" : "text-[var(--warning)]"
+                    displayStats.tender_eligible ? "text-[var(--success)]" : "text-[var(--warning)]"
                   )}
                 >
-                  {stats.tender_eligible ? "Tender Eligible" : "Tender Eligibility"}
+                  {displayStats.tender_eligible ? "Tender Eligible" : "Tender Eligibility"}
                 </span>
               </div>
               <p className="text-xs text-[var(--foreground-muted)]">
-                {stats.tender_eligible
+                {displayStats.tender_eligible
                   ? "You can bid on premium tenders in the marketplace."
                   : "Complete your CRM data to qualify for premium tenders."}
               </p>
-              {!stats.tender_eligible && (
+              {!displayStats.tender_eligible && (
                 <Link
                   href={`${base}/certification`}
                   className="text-xs font-medium text-[var(--warning)] flex items-center gap-1 hover:underline"
@@ -261,7 +302,7 @@ export default function CRMDashboardPage() {
               Recent Submissions
             </h3>
             <Link
-              href={`${base}/forms`}
+              href={`${base}/submissions`}
               className="text-xs text-[var(--primary)] hover:text-[var(--primary-hover)] flex items-center gap-1 font-medium transition-colors"
             >
               View all <ArrowRight className="w-3 h-3" />
@@ -281,11 +322,12 @@ export default function CRMDashboardPage() {
                   </div>
                 ))}
               </div>
-            ) : stats?.recent_submissions.length ? (
+            ) : displayStats.recent_submissions.length ? (
               <div className="divide-y divide-[var(--border)]">
-                {stats.recent_submissions.map((sub) => (
-                  <div
+                {displayStats.recent_submissions.map((sub) => (
+                  <Link
                     key={sub.id}
+                    href={`${base}/submissions?model_slug=${encodeURIComponent(sub.model_slug)}`}
                     className="px-5 py-4 flex items-center gap-4 hover:bg-[var(--background-muted)] transition-colors group"
                   >
                     <div className="w-8 h-8 rounded-lg bg-[var(--primary-light)] flex items-center justify-center shrink-0">
@@ -296,10 +338,10 @@ export default function CRMDashboardPage() {
                       <p className="text-xs text-[var(--foreground-muted)]">by {sub.member}</p>
                     </div>
                     <div className="flex items-center gap-2">
-                      <span className="text-xs text-[var(--foreground-subtle)]">{sub.submitted}</span>
+                      <span className="text-xs text-[var(--foreground-subtle)]">{formatRelativeTime(sub.submitted_at)}</span>
                       <ChevronRight className="w-3.5 h-3.5 text-[var(--foreground-subtle)] opacity-0 group-hover:opacity-100 transition-opacity" />
                     </div>
-                  </div>
+                  </Link>
                 ))}
               </div>
             ) : (
@@ -316,7 +358,7 @@ export default function CRMDashboardPage() {
       </div>
 
       {/* ── Capacity overview bar ─────────────────────────── */}
-      {stats && (
+      {!loading && (
         <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-6">
           <div className="flex items-center justify-between mb-4">
             <div>
@@ -329,10 +371,10 @@ export default function CRMDashboardPage() {
           </div>
           <div className="space-y-3">
             {[
-              { label: "Capacity Index",     value: stats.capacity_index,    color: "bg-[var(--primary)]" },
-              { label: "Data Completeness",  value: stats.data_completeness, color: "bg-blue-500" },
-              { label: "Member Engagement",  value: 72,                      color: "bg-purple-500" },
-              { label: "Production Regularity", value: 68,                   color: "bg-amber-500" },
+              { label: "Capacity Index", value: displayStats.capacity_index, color: "bg-[var(--primary)]" },
+              { label: "Data Completeness", value: displayStats.data_completeness, color: "bg-blue-500" },
+              { label: "Member Engagement", value: displayStats.member_engagement, color: "bg-purple-500" },
+              { label: "Production Regularity", value: displayStats.production_regularity, color: "bg-amber-500" },
             ].map((metric) => (
               <div key={metric.label} className="space-y-1.5">
                 <div className="flex justify-between text-xs">

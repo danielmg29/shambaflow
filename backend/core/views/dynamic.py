@@ -31,7 +31,7 @@ logger = logging.getLogger('shambaflow')
 # Models the dynamic endpoint will NOT serve
 # (sensitive or logic-heavy models have dedicated views)
 _PROTECTED_MODELS = {
-    'User', 'Cooperative', 'Bid', 'Tender',
+    'User', 'Cooperative', 'Bid', 'Tender', 'Notification',
     'ReputationLedger', 'CapacityMetric',
     'LogEntry', 'Permission', 'Group', 'ContentType', 'Session',
 }

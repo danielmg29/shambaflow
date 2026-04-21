@@ -44,8 +44,7 @@ from core.models import (
     VerificationDocument,
     Invitation,
 )
-from core.services.brevo_email import send_invitation_email
-from core.services.infobip_sms import send_invitation_sms
+from core.services.notifications import notifications
 
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -351,30 +350,17 @@ def role_management(request, cooperative_id: str):
         expires_at=timezone.now() + timedelta(days=7),
     )
 
-    # Notifications (non-fatal)
-    try:
-        send_invitation_email(
-            to_email=email,
-            to_name=f"{new_user.first_name} {new_user.last_name}",
-            cooperative_name=coop.name,
-            invite_token=invite_token,
-            temp_password=temp_password,
-            role=role,
-        )
-    except Exception:
-        pass
-
-    phone = request.data.get("phone_number", "")
-    if phone:
-        try:
-            send_invitation_sms(
-                to_phone=phone,
-                cooperative_name=coop.name,
-                invite_token=invite_token,
-                temp_password=temp_password,
-            )
-        except Exception:
-            pass
+    notifications.on_helper_invited(
+        email=email,
+        phone=request.data.get("phone_number", ""),
+        invitee_name=f"{new_user.first_name} {new_user.last_name}".strip() or email,
+        cooperative_name=coop.name,
+        role=role,
+        invitation_token=invite_token,
+        temporary_password=temp_password,
+        recipient_user=new_user,
+        cooperative=coop,
+    )
 
     return Response(
         {

@@ -1,11 +1,17 @@
-"""
-Notifications app URLs placeholder
-"""
+"""Notification center endpoints."""
 
 from django.urls import path
 
-app_name = 'notifications'
+from apps.notifications.views import (
+    notification_detail,
+    notification_list,
+    notification_mark_all_read,
+)
+
+app_name = "notifications"
 
 urlpatterns = [
-    # Placeholder - will be implemented later
+    path("", notification_list, name="list"),
+    path("read-all/", notification_mark_all_read, name="mark-all-read"),
+    path("<str:notification_id>/", notification_detail, name="detail"),
 ]

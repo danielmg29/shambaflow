@@ -73,7 +73,7 @@ from core.auth.services import (
     accept_invitation,
 )
 from core.models import User, Cooperative, RolePermission, Invitation, CooperativeChairProfile, BuyerProfile
-from core.services.infobip_sms import send_otp_sms
+from core.services.notifications import notifications
 
 logger = logging.getLogger('shambaflow')
 
@@ -254,7 +254,12 @@ def resend_otp_view(request):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     d = serializer.validated_data
-    sent = send_otp_sms(d['phone_number'], purpose=d['purpose'])
+    sent = notifications.send_otp(
+        phone=d['phone_number'],
+        purpose=d['purpose'],
+        recipient_user=request.user if request.user.is_authenticated else None,
+        cooperative=request.user.cooperative if request.user.is_authenticated and request.user.cooperative_id else None,
+    )
     if sent:
         return Response({'message': 'A new verification code has been sent.'})
     return Response(
@@ -480,6 +485,8 @@ def me_view(request):
     def _build_response() -> dict:
         cooperative_data = None
         permissions_map = {}
+        company_name = None
+        avatar_url = None
 
         if user.cooperative_id:
             try:
@@ -528,8 +535,11 @@ def me_view(request):
         profile_data = None
         if user.is_chair:
             profile_data = _get_chair_profile(user, request=request)
+            avatar_url = profile_data.get("profile_photo") if profile_data else None
         elif user.is_buyer:
             profile_data = _get_buyer_profile(user, request=request)
+            company_name = profile_data.get("company_name") if profile_data else None
+            avatar_url = profile_data.get("company_logo") if profile_data else None
 
         return {
             "id":                   str(user.id),
@@ -545,7 +555,10 @@ def me_view(request):
             "two_fa_enabled":       user.two_fa_enabled,
             "must_change_password": user.must_change_password,
             "cooperative":          cooperative_data,
+            "cooperative_name":     cooperative_data["name"] if cooperative_data else None,
             "cooperative_id":       str(user.cooperative_id) if user.cooperative_id else None,
+            "company_name":         company_name,
+            "avatar_url":           avatar_url,
             "permissions":          permissions_map,
             "profile":              profile_data,
         }

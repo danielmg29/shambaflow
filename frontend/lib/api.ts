@@ -37,8 +37,11 @@ export function clearTokens() {
 export function saveUser(user: object) {
   if (typeof window !== "undefined") {
     localStorage.setItem("sf_user", JSON.stringify(user));
+    window.dispatchEvent(new CustomEvent(USER_UPDATED_EVENT));
   }
 }
+
+export const USER_UPDATED_EVENT = "sf:user-updated";
 
 export interface ModulePermissionFlags {
   can_view: boolean;
@@ -51,11 +54,15 @@ export interface ModulePermissionFlags {
 export interface UserSnapshot {
   id: string;
   email: string;
-  full_name: string;
+  first_name?: string;
+  last_name?: string;
+  full_name?: string;
   user_type: "CHAIR" | "HELPER" | "BUYER" | "PLATFORM";
   must_change_password?: boolean;
   cooperative_id: string | null;
   cooperative_name?: string | null;
+  company_name?: string | null;
+  avatar_url?: string | null;
   helper_role: string | null;
   is_email_verified?: boolean;
   is_phone_verified?: boolean;

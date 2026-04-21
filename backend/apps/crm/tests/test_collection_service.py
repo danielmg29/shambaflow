@@ -2,8 +2,18 @@ from datetime import date
 
 from django.test import TestCase
 
-from apps.crm.services.collection import delete_record, get_member_dashboard_payload, get_member_records, get_member_templates, get_model_analytics, save_record
-from core.models import Cooperative, DynamicFieldDefinition, FormField, FormTemplate, Member, ProductionRecord, User
+from apps.crm.services.collection import (
+    delete_record,
+    get_cooperative_certification_workspace,
+    get_cooperative_dashboard_payload,
+    get_cooperative_submissions_workspace,
+    get_member_dashboard_payload,
+    get_member_records,
+    get_member_templates,
+    get_model_analytics,
+    save_record,
+)
+from core.models import CapacityMetric, CapacitySnapshot, Cooperative, DynamicFieldDefinition, FormField, FormTemplate, Member, ProductionRecord, User, VerificationDocument
 
 
 class CollectionServiceEditDeleteTests(TestCase):
@@ -413,3 +423,139 @@ class CollectionServiceEditDeleteTests(TestCase):
         )
         self.assertEqual(dated["total_count"], 1)
         self.assertEqual(dated["data"][0]["extra_data"]["product_name"], "Beans")
+
+    def test_cooperative_dashboard_payload_aggregates_live_crm_and_capacity_data(self):
+        second_member = Member.objects.create(
+            cooperative=self.cooperative,
+            added_by=self.chair,
+            status=Member.MemberStatus.ACTIVE,
+            extra_data={"full_name": "Brian Harvester"},
+        )
+        self.cooperative.verification_status = Cooperative.VerificationStatus.VERIFIED
+        self.cooperative.save(update_fields=["verification_status"])
+
+        CapacityMetric.objects.create(
+            cooperative=self.cooperative,
+            overall_index=81,
+            data_completeness_score=76,
+            governance_participation_score=64,
+            production_consistency_score=71,
+            is_premium_eligible=True,
+        )
+
+        save_record(
+            self.cooperative,
+            self.chair,
+            "production",
+            {
+                "record_date": "2026-04-10",
+                "collection_scope": "MEMBER",
+                "member_number": self.member.member_number,
+                "season": "Long Rains",
+            },
+        )
+        save_record(
+            self.cooperative,
+            self.chair,
+            "production",
+            {
+                "record_date": "2026-04-12",
+                "collection_scope": "MEMBER",
+                "member_number": second_member.member_number,
+                "season": "Short Rains",
+            },
+        )
+
+        payload = get_cooperative_dashboard_payload(self.cooperative, self.chair)
+
+        self.assertEqual(payload["member_count"], 2)
+        self.assertEqual(payload["active_cycles"], 2)
+        self.assertEqual(payload["capacity_index"], 81)
+        self.assertEqual(payload["data_completeness"], 76)
+        self.assertEqual(payload["member_engagement"], 64)
+        self.assertEqual(payload["production_regularity"], 71)
+        self.assertTrue(payload["is_verified"])
+        self.assertTrue(payload["tender_eligible"])
+        self.assertTrue(payload["permissions"]["production"]["can_view"])
+        self.assertTrue(
+            any(item["type"] == "Production Record" for item in payload["recent_submissions"])
+        )
+        self.assertTrue(
+            any(item["member"] == "Alice Farmer" for item in payload["recent_submissions"])
+        )
+
+    def test_submissions_workspace_returns_widgets_and_paginated_rows(self):
+        save_record(
+            self.cooperative,
+            self.chair,
+            "production",
+            {
+                "record_date": "2026-04-10",
+                "collection_scope": "MEMBER",
+                "member_number": self.member.member_number,
+                "season": "Long Rains",
+            },
+        )
+        save_record(
+            self.cooperative,
+            self.chair,
+            "governance",
+            {
+                "record_date": "2026-04-13",
+                "collection_scope": "COOPERATIVE",
+                "decision": "Approved budget",
+            },
+        )
+
+        payload = get_cooperative_submissions_workspace(
+            self.cooperative,
+            self.chair,
+            page=1,
+            page_size=10,
+        )
+
+        self.assertEqual(payload["total_count"], 3)
+        self.assertEqual(payload["cards"][0]["id"], "total_submissions")
+        self.assertTrue(any(chart["id"] == "submission_timeline" for chart in payload["charts"]))
+        self.assertTrue(any(item["model_slug"] == "production" for item in payload["data"]))
+        self.assertTrue(any(option["value"] == "governance" for option in payload["module_options"]))
+
+    def test_certification_workspace_returns_scores_snapshots_and_documents(self):
+        self.cooperative.verification_status = Cooperative.VerificationStatus.VERIFIED
+        self.cooperative.save(update_fields=["verification_status"])
+
+        CapacityMetric.objects.create(
+            cooperative=self.cooperative,
+            overall_index=81,
+            data_completeness_score=76,
+            governance_participation_score=64,
+            production_consistency_score=71,
+            verification_score=92,
+            estimated_annual_volume_kg=15420,
+            is_premium_eligible=True,
+        )
+        CapacitySnapshot.objects.create(
+            cooperative=self.cooperative,
+            overall_index=74,
+            snapshot_date=date(2026, 2, 1),
+        )
+        CapacitySnapshot.objects.create(
+            cooperative=self.cooperative,
+            overall_index=81,
+            snapshot_date=date(2026, 4, 1),
+        )
+        VerificationDocument.objects.create(
+            cooperative=self.cooperative,
+            document_type="REGISTRATION_CERTIFICATE",
+            file="verification/test.pdf",
+            status="APPROVED",
+        )
+
+        payload = get_cooperative_certification_workspace(self.cooperative, self.chair)
+
+        self.assertEqual(payload["scores"]["capacity_index"], 81)
+        self.assertTrue(payload["status"]["is_verified"])
+        self.assertTrue(payload["status"]["is_premium_eligible"])
+        self.assertEqual(payload["documents"]["approved"], 1)
+        self.assertTrue(any(chart["id"] == "capacity_trend" for chart in payload["charts"]))
+        self.assertEqual(payload["cards"][0]["id"], "capacity_index")

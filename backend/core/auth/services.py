@@ -4,7 +4,6 @@ All authentication business logic. Views are thin wrappers around these function
 """
 
 import hashlib
-import logging
 import secrets
 from datetime import timedelta
 
@@ -13,13 +12,9 @@ from django.db import transaction
 from django.utils import timezone
 from django.utils.text import slugify
 
-from core.services.brevo_email import (
-    send_cooperative_verification_email,
-    send_password_reset_email,
-)
-from core.services.infobip_sms import send_otp_sms, verify_otp as verify_sms_otp
+from core.services.infobip_sms import verify_otp as verify_sms_otp
+from core.services.notifications import notifications
 
-logger = logging.getLogger('shambaflow')
 User = get_user_model()
 
 
@@ -93,20 +88,20 @@ def register_cooperative(data: dict) -> dict:
     cooperative.chair = chair
     cooperative.save(update_fields=['chair'])
 
-    if verification_method == 'sms' and chair_phone:
-        send_otp_sms(chair_phone, purpose='verification')
-    else:
+    if verification_method != 'sms' or not chair_phone:
         verification_method = 'email'
-        chair_name = f"{data.get('chair_first_name', '')} {data.get('chair_last_name', '')}".strip()
-        try:
-            send_cooperative_verification_email(
-                to_email=chair_email,
-                cooperative_name=cooperative.name,
-                chair_name=chair_name or chair_email,
-                verification_token=verification_token,
-            )
-        except Exception as e:
-            logger.warning('Failed to send verification email: %s', e)
+
+    chair_name = f"{data.get('chair_first_name', '')} {data.get('chair_last_name', '')}".strip()
+    notifications.on_cooperative_registered(
+        email=chair_email,
+        phone=chair_phone,
+        cooperative_name=cooperative.name,
+        chair_name=chair_name or chair_email,
+        verification_token=verification_token,
+        verification_method=verification_method,
+        recipient_user=chair,
+        cooperative=cooperative,
+    )
 
     return {
         'user_id': str(chair.id),
@@ -153,20 +148,18 @@ def register_buyer(data: dict) -> dict:
         buyer_type=data.get('buyer_type', 'TRADER'),
     )
 
-    if verification_method == 'sms' and phone:
-        send_otp_sms(phone, purpose='verification')
-    else:
+    if verification_method != 'sms' or not phone:
         verification_method = 'email'
-        buyer_name = f"{data.get('first_name', '')} {data.get('last_name', '')}".strip()
-        try:
-            send_cooperative_verification_email(
-                to_email=email,
-                cooperative_name='ShambaFlow',
-                chair_name=buyer_name or email,
-                verification_token=verification_token,
-            )
-        except Exception as e:
-            logger.warning('Failed to send verification email: %s', e)
+
+    buyer_name = f"{data.get('first_name', '')} {data.get('last_name', '')}".strip()
+    notifications.on_buyer_registered(
+        email=email,
+        phone=phone,
+        buyer_name=buyer_name or email,
+        verification_token=verification_token,
+        verification_method=verification_method,
+        recipient_user=user,
+    )
 
     return {'user_id': str(user.id), 'verification_method': verification_method}
 
@@ -202,15 +195,26 @@ def resend_verification_email(email: str) -> tuple[bool, str]:
     user.email_verification_token = _hash(token)
     user.save(update_fields=['email_verification_token'])
 
-    try:
-        send_cooperative_verification_email(
-            to_email=user.email,
+    if user.is_buyer:
+        notifications.on_buyer_registered(
+            email=user.email,
+            phone=user.phone_number,
+            buyer_name=user.get_full_name() or user.email,
+            verification_token=token,
+            verification_method='email',
+            recipient_user=user,
+        )
+    else:
+        notifications.on_cooperative_registered(
+            email=user.email,
+            phone=user.phone_number,
             cooperative_name=user.cooperative.name if user.cooperative else 'ShambaFlow',
             chair_name=user.get_full_name() or user.email,
             verification_token=token,
+            verification_method='email',
+            recipient_user=user,
+            cooperative=user.cooperative if user.cooperative_id else None,
         )
-    except Exception as e:
-        logger.warning('Failed to resend verification email: %s', e)
 
     return True, msg
 
@@ -243,23 +247,23 @@ def initiate_password_reset(identifier: str, method: str = 'email') -> None:
         return
 
     if method == 'sms':
-        try:
-            send_otp_sms(user.phone_number, purpose='password_reset')
-        except Exception as e:
-            logger.warning('Failed to send reset OTP: %s', e)
+        notifications.send_otp(
+            phone=user.phone_number,
+            purpose='password_reset',
+            recipient_user=user,
+            cooperative=user.cooperative if user.cooperative_id else None,
+        )
     else:
         token = _gen_token()
         user.reset_password_token = _hash(token)
         user.reset_password_token_expires = timezone.now() + timedelta(hours=1)
         user.save(update_fields=['reset_password_token', 'reset_password_token_expires'])
-        try:
-            send_password_reset_email(
-                to_email=user.email,
-                user_name=user.get_full_name() or user.email,
-                reset_token=token,
-            )
-        except Exception as e:
-            logger.warning('Failed to send reset email: %s', e)
+        notifications.on_password_reset_requested(
+            email=user.email,
+            user_name=user.get_full_name() or user.email,
+            reset_token=token,
+            recipient_user=user,
+        )
 
 
 def complete_password_reset(token: str, new_password: str) -> tuple[bool, str]:

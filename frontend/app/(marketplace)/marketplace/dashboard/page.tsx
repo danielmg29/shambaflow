@@ -19,7 +19,7 @@ import {
   CheckCircle2, AlertCircle, BarChart3,
 } from "lucide-react";
 import { StatCard } from "@/components/shambaflow/StatCard";
-import { apiFetch, getUser } from "@/lib/api";
+import { apiFetch, getUser, type UserSnapshot } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 /* ─── Types ───────────────────────────────────────────────────────── */
@@ -83,7 +83,7 @@ function ActivityRow({ item }: { item: ActivityItem }) {
 /* ─── Main Page ───────────────────────────────────────────────────── */
 
 export default function MarketplaceDashboardPage() {
-  const user        = getUser() as Record<string, string> | null;
+  const user        = getUser() as UserSnapshot | null;
   const displayName = user?.full_name ?? user?.email ?? "Buyer";
   const company     = user?.company_name ?? "";
 
