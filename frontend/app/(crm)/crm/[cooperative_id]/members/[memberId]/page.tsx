@@ -1010,6 +1010,16 @@ export default function MemberDashboardPage() {
         tone: "default",
       },
       {
+        id: "production_waste",
+        label: "Waste tracked",
+        value: `${analytics.production.waste_kg.toLocaleString()} kg`,
+        helper_text:
+          analytics.production.records_with_waste > 0
+            ? `${analytics.production.waste_rate}% of captured output across ${analytics.production.records_with_waste} production record${analytics.production.records_with_waste === 1 ? "" : "s"}.`
+            : "No waste signals detected in the captured production data.",
+        tone: analytics.production.waste_kg > 0 ? "accent" : "default",
+      },
+      {
         id: "livestock_events",
         label: "Livestock events",
         value: analytics.livestock.total_events.toLocaleString(),
@@ -1054,6 +1064,10 @@ export default function MemberDashboardPage() {
       {
         label: "Seasons tracked",
         value: analytics.production.seasons.length > 0 ? analytics.production.seasons.join(", ") : "No seasons logged",
+      },
+      {
+        label: "Waste rate",
+        value: `${analytics.production.waste_rate}%`,
       },
     ],
   };

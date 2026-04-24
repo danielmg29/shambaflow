@@ -168,3 +168,62 @@ class NotificationDispatcherPreferenceTests(TestCase):
 
         created = Notification.objects.get(recipient=helper, event_type="helper_invited")
         self.assertEqual(created.delivery_channels, [notifications.IN_APP])
+
+    @patch("core.services.notifications.send_buyer_verification_email", return_value=True)
+    def test_buyer_registration_uses_buyer_email_template(self, mock_send_email):
+        from core.models import BuyerProfile
+
+        buyer = User.objects.create_buyer(
+            email="buyer@kijani.test",
+            password="StrongPass123!",
+            first_name="Agnes",
+            last_name="Kilonzo",
+            phone_number="+254700000444",
+        )
+        buyer_profile = BuyerProfile.objects.create(
+            user=buyer,
+            company_name="Kijani Foods",
+            buyer_type="RETAILER",
+        )
+
+        notifications.on_buyer_registered(
+            email=buyer.email,
+            phone=buyer.phone_number,
+            buyer_name=buyer.full_name,
+            verification_token="buyer-token",
+            verification_method="email",
+            recipient_user=buyer,
+        )
+
+        mock_send_email.assert_called_once()
+        self.assertEqual(mock_send_email.call_args.kwargs["company_name"], buyer_profile.company_name)
+
+    @patch("core.services.notifications.send_buyer_verification_email", return_value=False)
+    def test_failed_buyer_email_does_not_mark_email_delivery_channel(self, mock_send_email):
+        from core.models import BuyerProfile
+
+        buyer = User.objects.create_buyer(
+            email="buyer2@kijani.test",
+            password="StrongPass123!",
+            first_name="David",
+            last_name="Muriuki",
+            phone_number="+254700000555",
+        )
+        BuyerProfile.objects.create(
+            user=buyer,
+            company_name="Fresh Basket",
+            buyer_type="TRADER",
+        )
+
+        notifications.on_buyer_registered(
+            email=buyer.email,
+            phone=buyer.phone_number,
+            buyer_name=buyer.full_name,
+            verification_token="buyer-token",
+            verification_method="email",
+            recipient_user=buyer,
+        )
+
+        mock_send_email.assert_called_once()
+        created = Notification.objects.get(recipient=buyer, event_type="buyer_account_created")
+        self.assertEqual(created.delivery_channels, [notifications.IN_APP])

@@ -1,306 +1,392 @@
 "use client";
 
-/**
- * Marketplace Dashboard — Buyer Home
- *
- * Shows:
- * - Active tenders summary
- * - Bids received count
- * - Shortlisted cooperatives
- * - Recent tender activity
- * - Quick actions (create tender, browse cooperatives)
- */
-
-import { useState, useEffect } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
-  Briefcase, FileText, Star, TrendingUp, PlusCircle,
-  Search, ChevronRight, ArrowRight, Building2, Clock,
-  CheckCircle2, AlertCircle, BarChart3,
+  ArrowRight,
+  BriefcaseBusiness,
+  Building2,
+  ClipboardCheck,
+  Clock3,
+  Loader2,
+  Settings,
+  Sparkles,
+  UsersRound,
 } from "lucide-react";
+
+import BuyerInsightsPanel, { type BuyerDashboardAnalytics } from "@/components/marketplace/BuyerInsightsPanel";
 import { StatCard } from "@/components/shambaflow/StatCard";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { apiFetch, getUser, type UserSnapshot } from "@/lib/api";
+import {
+  formatDate,
+  formatRelativeTime,
+  formatQuantityRange,
+  tenderStatusTone,
+} from "@/lib/marketplace";
 import { cn } from "@/lib/utils";
 
-/* ─── Types ───────────────────────────────────────────────────────── */
-
-interface BuyerDashboardStats {
-  active_tenders:       number;
-  bids_received:        number;
-  shortlisted:          number;
-  completed_tenders:    number;
-  recent_activity:      ActivityItem[];
+interface FeaturedTender {
+  id: string;
+  title: string;
+  product_category_display: string;
+  product_name: string;
+  status: string;
+  status_display: string;
+  quantity_kg_min: number;
+  quantity_kg_max: number;
+  total_bids: number;
+  bid_deadline: string;
+  delivery_location: string;
+  href: string;
 }
 
 interface ActivityItem {
-  id:      string;
-  title:   string;
-  type:    "bid_received" | "tender_closed" | "tender_published" | "bid_accepted";
-  time:    string;
-  coop?:   string;
+  id: string;
+  type: string;
+  title: string;
+  description: string;
+  timestamp: string;
+  href: string;
 }
 
-/* ─── Tender status badge ─────────────────────────────────────────── */
+interface DashboardHeroCard {
+  id: string;
+  label: string;
+  value: string;
+}
 
-const STATUS_CONFIG = {
-  OPEN:      { label: "Open",      color: "bg-[var(--success-light)] text-[var(--success)]" },
-  CLOSED:    { label: "Closed",    color: "bg-[var(--background-muted)] text-[var(--foreground-muted)]" },
-  AWARDED:   { label: "Awarded",   color: "bg-[var(--info-light)] text-[var(--info)]" },
-  CANCELLED: { label: "Cancelled", color: "bg-[var(--destructive-light)] text-[var(--destructive)]" },
+interface DashboardSummaryCard {
+  id: string;
+  label: string;
+  value: string;
+  trend: "up" | "down" | "neutral";
+  trend_value: string;
+  tone: "default" | "primary" | "accent";
+}
+
+interface DashboardPayload {
+  summary: {
+    active_tenders: number;
+    bids_received: number;
+    shortlisted: number;
+    completed_tenders: number;
+    draft_tenders: number;
+    profile_completion: number;
+  };
+  onboarding: {
+    is_complete: boolean;
+    completion_percent: number;
+    missing_fields: string[];
+  };
+  hero_cards: DashboardHeroCard[];
+  summary_cards: DashboardSummaryCard[];
+  analytics: BuyerDashboardAnalytics;
+  featured_tenders: FeaturedTender[];
+  recent_activity: ActivityItem[];
+}
+
+const buyerDashboardHeroStyle = {
+  background:
+    "radial-gradient(circle at top left, color-mix(in oklch, var(--secondary) 20%, transparent) 0%, transparent 30%), radial-gradient(circle at bottom right, color-mix(in oklch, var(--primary) 24%, transparent) 0%, transparent 34%), linear-gradient(132deg, color-mix(in oklch, var(--foreground) 86%, var(--primary) 14%) 0%, color-mix(in oklch, var(--primary) 78%, var(--foreground) 22%) 45%, color-mix(in oklch, var(--secondary) 54%, var(--primary) 46%) 100%)",
+  boxShadow: "0 24px 80px color-mix(in oklch, var(--primary) 24%, transparent)",
 };
 
-/* ─── Activity item ───────────────────────────────────────────────── */
-
-function ActivityRow({ item }: { item: ActivityItem }) {
-  const icons = {
-    bid_received:     { icon: FileText, color: "text-blue-500 bg-blue-50 dark:bg-blue-900/30" },
-    tender_closed:    { icon: AlertCircle, color: "text-amber-500 bg-amber-50 dark:bg-amber-900/30" },
-    tender_published: { icon: Briefcase, color: "text-[var(--primary)] bg-[var(--primary-light)]" },
-    bid_accepted:     { icon: CheckCircle2, color: "text-[var(--success)] bg-[var(--success-light)]" },
-  };
-
-  const { icon: Icon, color } = icons[item.type] ?? icons.tender_published;
-
-  return (
-    <div className="flex items-start gap-4 py-3.5 px-5 hover:bg-[var(--background-muted)] transition-colors group">
-      <div className={cn("w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5", color)}>
-        <Icon className="w-4 h-4" />
-      </div>
-      <div className="flex-1 min-w-0">
-        <p className="text-sm font-medium text-[var(--foreground)]">{item.title}</p>
-        {item.coop && (
-          <p className="text-xs text-[var(--foreground-muted)] mt-0.5">by {item.coop}</p>
-        )}
-      </div>
-      <div className="flex items-center gap-2 shrink-0">
-        <span className="text-xs text-[var(--foreground-subtle)]">{item.time}</span>
-        <ChevronRight className="w-3.5 h-3.5 text-[var(--foreground-subtle)] opacity-0 group-hover:opacity-100 transition-opacity" />
-      </div>
-    </div>
-  );
-}
-
-/* ─── Main Page ───────────────────────────────────────────────────── */
+const dashboardCardIcons = {
+  active_tenders: <BriefcaseBusiness className="h-5 w-5" />,
+  responses: <UsersRound className="h-5 w-5" />,
+  shortlisted: <Sparkles className="h-5 w-5" />,
+  completed: <ClipboardCheck className="h-5 w-5" />,
+  drafts: <Settings className="h-5 w-5" />,
+} as const;
 
 export default function MarketplaceDashboardPage() {
-  const user        = getUser() as UserSnapshot | null;
-  const displayName = user?.full_name ?? user?.email ?? "Buyer";
-  const company     = user?.company_name ?? "";
-
-  const [stats,   setStats]   = useState<BuyerDashboardStats | null>(null);
+  const user = getUser() as UserSnapshot | null;
+  const [payload, setPayload] = useState<DashboardPayload | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    apiFetch<BuyerDashboardStats>("/api/marketplace/dashboard/")
-      .then(setStats)
-      .catch(() => {
-        // Demo data while API is being built
-        setStats({
-          active_tenders:    4,
-          bids_received:     12,
-          shortlisted:       3,
-          completed_tenders: 8,
-          recent_activity: [
-            { id: "1", type: "bid_received",     title: "New bid on \"Maize Supply — 10T\"", coop: "Meru Central Farmers Coop", time: "15m ago" },
-            { id: "2", type: "bid_accepted",      title: "Your bid accepted on \"Dairy Supply Q1\"", time: "2h ago" },
-            { id: "3", type: "tender_published",  title: "Tender \"Fresh Vegetables — 5T\" published", time: "5h ago" },
-            { id: "4", type: "bid_received",      title: "New bid on \"Tomatoes Monthly Contract\"", coop: "Kiambu Horticulture Coop", time: "Yesterday" },
-            { id: "5", type: "tender_closed",     title: "Tender \"Beans Supply\" has closed for bids", time: "Yesterday" },
-          ],
-        });
-      })
+    apiFetch<DashboardPayload>("/api/marketplace/dashboard/")
+      .then(setPayload)
       .finally(() => setLoading(false));
   }, []);
 
-  function SkeletonCard() {
+  if (loading) {
     return (
-      <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 animate-pulse">
-        <div className="h-3 w-20 bg-[var(--background-muted)] rounded mb-4" />
-        <div className="h-8 w-16 bg-[var(--background-muted)] rounded mb-2" />
-        <div className="h-2.5 w-24 bg-[var(--background-muted)] rounded" />
+      <div className="flex min-h-[60vh] items-center justify-center">
+        <div className="flex items-center gap-3 rounded-full border border-[var(--border)] bg-[var(--surface)] px-5 py-3 text-sm text-[var(--foreground-muted)]">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Loading buyer studio…
+        </div>
       </div>
     );
   }
 
   return (
     <div className="space-y-8">
-      {/* ── Header ──────────────────────────────── */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h2 className="text-2xl font-bold text-[var(--foreground)] font-[var(--font-sans)]">
-            Welcome back, {displayName.split(" ")[0]}
-          </h2>
-          {company && (
-            <p className="text-sm text-[var(--foreground-muted)] mt-0.5 flex items-center gap-1.5">
-              <Building2 className="w-3.5 h-3.5 text-[var(--primary)]" />
-              {company}
-            </p>
-          )}
-        </div>
-
-        <Link
-          href="/marketplace/create"
-          className="inline-flex items-center gap-2 px-5 h-10 rounded-xl text-sm font-semibold
-                     bg-[var(--primary)] text-[var(--primary-fg)] hover:bg-[var(--primary-hover)]
-                     shadow-[var(--shadow-green)] transition-all duration-200"
-        >
-          <PlusCircle className="w-4 h-4" />
-          Post a Tender
-        </Link>
-      </div>
-
-      {/* ── Stats grid ────────────────────────────── */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {loading ? (
-          Array.from({ length: 4 }, (_, i) => <SkeletonCard key={i} />)
-        ) : (
-          <>
-            <Link href="/marketplace/my-tenders">
-              <StatCard
-                label="Active Tenders" value={stats?.active_tenders ?? 0}
-                icon={<Briefcase className="w-5 h-5" />} variant="primary"
-              />
-            </Link>
-            <Link href="/marketplace/bids">
-              <StatCard
-                label="Bids Received" value={stats?.bids_received ?? 0}
-                icon={<FileText className="w-5 h-5" />} variant="default"
-                trend="up" trendValue="+3 this month"
-              />
-            </Link>
-            <Link href="/marketplace/shortlisted">
-              <StatCard
-                label="Shortlisted" value={stats?.shortlisted ?? 0}
-                icon={<Star className="w-5 h-5" />} variant="default"
-              />
-            </Link>
-            <Link href="/marketplace/history">
-              <StatCard
-                label="Completed" value={stats?.completed_tenders ?? 0}
-                icon={<CheckCircle2 className="w-5 h-5" />} variant="default"
-              />
-            </Link>
-          </>
-        )}
-      </div>
-
-      {/* ── Two-column: quick actions + activity ─── */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Quick actions */}
-        <div className="lg:col-span-1 space-y-4">
-          <h3 className="text-sm font-semibold text-[var(--foreground-muted)] uppercase tracking-wider">
-            Quick Actions
-          </h3>
-
-          <div className="space-y-2">
-            {[
-              { label: "Post new tender",          href: "/marketplace/create",       icon: PlusCircle,  color: "text-[var(--primary)]  bg-[var(--primary-light)]" },
-              { label: "Browse cooperatives",      href: "/marketplace/cooperatives", icon: Search,       color: "text-blue-600 bg-blue-50 dark:bg-blue-900/30" },
-              { label: "View bids received",       href: "/marketplace/bids",         icon: FileText,     color: "text-purple-600 bg-purple-50 dark:bg-purple-900/30" },
-              { label: "My active tenders",        href: "/marketplace/my-tenders",   icon: Briefcase,    color: "text-amber-600 bg-amber-50 dark:bg-amber-900/30" },
-              { label: "Trade history",            href: "/marketplace/history",      icon: BarChart3,    color: "text-green-600 bg-green-50 dark:bg-green-900/30" },
-            ].map((a) => (
-              <Link
-                key={a.label}
-                href={a.href}
-                className="flex items-center gap-3 px-4 py-3 rounded-xl border border-[var(--border)]
-                           bg-[var(--surface)] hover:border-[var(--border-strong)] hover:shadow-[var(--shadow-sm)]
-                           transition-all duration-150 group"
+      <section
+        className="overflow-hidden rounded-[28px] border border-[var(--border)] p-6 text-white sm:p-8"
+        style={buyerDashboardHeroStyle}
+      >
+        <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
+          <div className="space-y-4">
+            <Badge className="w-fit border-white/14 bg-white/12 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-white shadow-none hover:bg-white/12">
+              <BriefcaseBusiness className="h-3.5 w-3.5" />
+              Buyer Studio
+            </Badge>
+            <div>
+              <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">
+                {`Welcome back${user?.first_name ? `, ${user.first_name}` : ""}.`}
+              </h1>
+              <p className="mt-2 max-w-2xl text-sm leading-6 text-white/82 sm:text-base">
+                Run your sourcing marketplace from one standalone workspace with live tenders, cooperative responses, and buyer readiness in view.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                asChild
+                className="h-11 rounded-2xl bg-white px-5 shadow-[0_12px_30px_rgba(0,0,0,0.14)] hover:bg-white/90"
+                style={{ color: "color-mix(in oklch, var(--foreground) 18%, black)" }}
               >
-                <div className={cn("w-8 h-8 rounded-lg flex items-center justify-center shrink-0", a.color)}>
-                  <a.icon className="w-4 h-4" />
-                </div>
-                <span className="flex-1 text-sm font-medium text-[var(--foreground-muted)] group-hover:text-[var(--foreground)] transition-colors">
-                  {a.label}
-                </span>
-                <ChevronRight className="w-3.5 h-3.5 text-[var(--foreground-subtle)] opacity-0 group-hover:opacity-100 transition-opacity" />
-              </Link>
+                <Link href="/marketplace/tenders?mode=create">
+                  Publish a tender
+                  <ArrowRight className="h-4 w-4" />
+                </Link>
+              </Button>
+              <Button asChild variant="outline" className="h-11 rounded-2xl border-white/16 bg-black/14 px-5 text-white backdrop-blur-sm hover:bg-black/20">
+                <Link href="/marketplace/tenders">
+                  Review tenders
+                </Link>
+              </Button>
+            </div>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            {(payload?.hero_cards ?? []).map((item) => (
+              <div key={item.label} className="sf-hero-panel rounded-[22px] px-4 py-4">
+                <p className="text-[11px] uppercase tracking-[0.2em] text-white/65">{item.label}</p>
+                <p className="mt-2 text-sm font-semibold text-white">{item.value}</p>
+              </div>
             ))}
           </div>
         </div>
+      </section>
 
-        {/* Recent Activity */}
-        <div className="lg:col-span-2 space-y-4">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-[var(--foreground-muted)] uppercase tracking-wider">
-              Recent Activity
-            </h3>
+      {!payload?.onboarding.is_complete && (
+        <section className="sf-tone-warning rounded-[24px] border p-5 shadow-[var(--shadow-sm)]">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <p className="text-sm font-semibold">Buyer onboarding still has gaps.</p>
+              <p className="mt-1 text-sm">
+                Missing fields: {payload.onboarding.missing_fields.join(", ")}.
+              </p>
+            </div>
+            <Button asChild variant="outline" className="h-10 rounded-2xl px-4">
+              <Link href="/marketplace/onboarding">
+                Complete onboarding
+                <ArrowRight className="h-4 w-4" />
+              </Link>
+            </Button>
+          </div>
+        </section>
+      )}
+
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+        {(payload?.summary_cards ?? []).map((card) => (
+          <StatCard
+            key={card.id}
+            label={card.label}
+            value={card.value}
+            icon={dashboardCardIcons[card.id as keyof typeof dashboardCardIcons]}
+            variant={card.tone}
+            trend={card.trend}
+            trendValue={card.trend_value}
+          />
+        ))}
+      </div>
+
+      <BuyerInsightsPanel analytics={payload?.analytics} />
+
+      <div className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
+        <section className="rounded-[24px] border border-[var(--border)] bg-[var(--surface)] p-6 shadow-[var(--shadow-sm)]">
+          <div className="mb-5 flex items-center justify-between gap-4">
+            <div>
+              <h2 className="text-lg font-semibold text-[var(--foreground)]">Live tender portfolio</h2>
+              <p className="text-sm text-[var(--foreground-muted)]">
+                Your most recent or most active sourcing opportunities.
+              </p>
+            </div>
             <Link
-              href="/marketplace/my-tenders"
-              className="text-xs text-[var(--primary)] hover:text-[var(--primary-hover)] flex items-center gap-1 font-medium transition-colors"
+              href="/marketplace/tenders"
+              className="inline-flex items-center gap-1 text-sm font-semibold text-[var(--primary)]"
             >
-              All tenders <ArrowRight className="w-3 h-3" />
+              All tenders
+              <ArrowRight className="h-4 w-4" />
             </Link>
           </div>
 
-          <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] overflow-hidden">
-            {loading ? (
-              <div className="divide-y divide-[var(--border)]">
-                {Array.from({ length: 5 }, (_, i) => (
-                  <div key={i} className="px-5 py-4 flex items-center gap-4 animate-pulse">
-                    <div className="w-8 h-8 rounded-lg bg-[var(--background-muted)]" />
-                    <div className="flex-1 space-y-1.5">
-                      <div className="h-3 w-48 bg-[var(--background-muted)] rounded" />
-                      <div className="h-2.5 w-32 bg-[var(--background-muted)] rounded" />
+          <div className="space-y-4">
+            {payload?.featured_tenders.length ? payload.featured_tenders.map((tender) => (
+              <article key={tender.id} className="rounded-[22px] border border-[var(--border)] bg-[var(--background)] p-5">
+                <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className={cn("rounded-full border px-3 py-1 text-xs font-semibold", tenderStatusTone(tender.status))}>
+                        {tender.status_display}
+                      </span>
+                      <span className="rounded-full border border-[var(--border)] bg-[var(--surface)] px-3 py-1 text-xs font-semibold text-[var(--foreground-muted)]">
+                        {tender.product_category_display}
+                      </span>
+                    </div>
+                    <div>
+                      <h3 className="text-lg font-semibold text-[var(--foreground)]">{tender.title}</h3>
+                      <p className="mt-1 text-sm text-[var(--foreground-muted)]">
+                        {tender.product_name} · {tender.delivery_location}
+                      </p>
+                    </div>
+                    <div className="grid gap-3 text-sm text-[var(--foreground-muted)] sm:grid-cols-3">
+                      <div>
+                        <p className="text-[11px] uppercase tracking-[0.18em] text-[var(--foreground-subtle)]">Quantity</p>
+                        <p className="mt-1 font-medium text-[var(--foreground)]">
+                          {formatQuantityRange(tender.quantity_kg_min, tender.quantity_kg_max)}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-[11px] uppercase tracking-[0.18em] text-[var(--foreground-subtle)]">Bid deadline</p>
+                        <p className="mt-1 font-medium text-[var(--foreground)]">{formatDate(tender.bid_deadline)}</p>
+                      </div>
+                      <div>
+                        <p className="text-[11px] uppercase tracking-[0.18em] text-[var(--foreground-subtle)]">Responses</p>
+                        <p className="mt-1 font-medium text-[var(--foreground)]">{tender.total_bids}</p>
+                      </div>
                     </div>
                   </div>
-                ))}
-              </div>
-            ) : stats?.recent_activity.length ? (
-              <div className="divide-y divide-[var(--border)]">
-                {stats.recent_activity.map((item) => (
-                  <ActivityRow key={item.id} item={item} />
-                ))}
-              </div>
-            ) : (
-              <div className="flex flex-col items-center justify-center py-12 text-center">
-                <Briefcase className="w-10 h-10 text-[var(--foreground-subtle)] mb-3" />
-                <p className="text-sm text-[var(--foreground-muted)]">No tender activity yet.</p>
+                  <Link
+                    href={tender.href}
+                    className="inline-flex h-10 items-center justify-center rounded-2xl border border-[var(--border)] bg-[var(--surface)] px-4 text-sm font-semibold text-[var(--foreground)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--surface)]"
+                  >
+                    View details
+                  </Link>
+                </div>
+              </article>
+            )) : (
+              <div className="rounded-[22px] border border-dashed border-[var(--border)] bg-[var(--background)] px-6 py-12 text-center">
+                <p className="text-lg font-semibold text-[var(--foreground)]">No tenders yet.</p>
+                <p className="mt-2 text-sm text-[var(--foreground-muted)]">
+                  Publish your first sourcing request to start collecting cooperative responses.
+                </p>
                 <Link
-                  href="/marketplace/create"
-                  className="mt-3 text-sm text-[var(--primary)] hover:text-[var(--primary-hover)] font-medium flex items-center gap-1.5"
+                  href="/marketplace/tenders?mode=create"
+                  className="mt-5 inline-flex h-10 items-center gap-2 rounded-2xl bg-[var(--primary)] px-4 text-sm font-semibold text-[var(--primary-fg)]"
                 >
-                  <PlusCircle className="w-3.5 h-3.5" /> Post your first tender
+                  Start a tender
+                  <ArrowRight className="h-4 w-4" />
                 </Link>
               </div>
             )}
           </div>
-        </div>
-      </div>
+        </section>
 
-      {/* ── Supply insight card ──────────────────────── */}
-      <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-6">
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-5">
-          <div>
-            <h3 className="text-sm font-semibold text-[var(--foreground)]">Supply Intelligence</h3>
-            <p className="text-xs text-[var(--foreground-muted)] mt-0.5">
-              Verified cooperative capacity available for your sourcing needs
-            </p>
-          </div>
-          <Link
-            href="/marketplace/cooperatives"
-            className="text-sm text-[var(--primary)] hover:text-[var(--primary-hover)] font-medium flex items-center gap-1.5 transition-colors"
-          >
-            Browse all <ArrowRight className="w-3.5 h-3.5" />
-          </Link>
-        </div>
-
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-          {[
-            { label: "Verified Coops",    value: "2,400+", sub: "Available to bid" },
-            { label: "Avg. Capacity",     value: "78%",    sub: "Index score" },
-            { label: "Active Categories", value: "12",     sub: "Crop & livestock" },
-            { label: "Regions Covered",   value: "47",     sub: "Counties in Kenya" },
-          ].map((stat) => (
-            <div
-              key={stat.label}
-              className="rounded-xl bg-[var(--background-muted)] p-4 text-center"
-            >
-              <p className="text-xl font-bold text-[var(--primary)] font-[var(--font-sans)]">{stat.value}</p>
-              <p className="text-xs font-medium text-[var(--foreground)] mt-0.5">{stat.label}</p>
-              <p className="text-[10px] text-[var(--foreground-subtle)] mt-0.5">{stat.sub}</p>
+        <div className="space-y-6">
+          <section className="rounded-[24px] border border-[var(--border)] bg-[var(--surface)] p-6 shadow-[var(--shadow-sm)]">
+            <div className="mb-4 flex items-center gap-3">
+              <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-[var(--primary-light)] text-[var(--primary)]">
+                <Clock3 className="h-5 w-5" />
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold text-[var(--foreground)]">Recent activity</h2>
+                <p className="text-sm text-[var(--foreground-muted)]">
+                  Buyer-side tender events and cooperative responses.
+                </p>
+              </div>
             </div>
-          ))}
+            <div className="space-y-3">
+              {payload?.recent_activity.length ? payload.recent_activity.map((item) => (
+                <Link
+                  key={item.id}
+                  href={item.href}
+                  className="block rounded-[20px] border border-[var(--border)] bg-[var(--background)] px-4 py-4 transition-colors hover:border-[var(--border-strong)]"
+                >
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <p className="text-sm font-semibold text-[var(--foreground)]">{item.title}</p>
+                      <p className="mt-1 text-sm leading-6 text-[var(--foreground-muted)]">{item.description}</p>
+                    </div>
+                    <span className="shrink-0 text-xs font-semibold text-[var(--foreground-subtle)]">
+                      {formatRelativeTime(item.timestamp)}
+                    </span>
+                  </div>
+                </Link>
+              )) : (
+                <p className="text-sm text-[var(--foreground-muted)]">Activity will appear here once tenders are published.</p>
+              )}
+            </div>
+          </section>
+
+          <section className="rounded-[24px] border border-[var(--border)] bg-[var(--surface)] p-6 shadow-[var(--shadow-sm)]">
+            <div className="mb-4 flex items-center gap-3">
+              <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-[var(--primary-light)] text-[var(--primary)]">
+                <Sparkles className="h-5 w-5" />
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold text-[var(--foreground)]">Buyer workspace shortcuts</h2>
+                <p className="text-sm text-[var(--foreground-muted)]">
+                  Jump into the next task without opening the sidebar.
+                </p>
+              </div>
+            </div>
+            <div className="grid gap-3">
+              {[
+                { href: "/marketplace/tenders", label: "Manage tenders", icon: BriefcaseBusiness },
+                { href: "/marketplace/onboarding", label: "Review onboarding", icon: ClipboardCheck },
+                { href: "/marketplace/profile", label: "Update buyer profile", icon: Building2 },
+                { href: "/marketplace/settings", label: "Account settings", icon: Settings },
+              ].map((item) => (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  className="flex items-center gap-3 rounded-[20px] border border-[var(--border)] bg-[var(--background)] px-4 py-4 transition-colors hover:border-[var(--border-strong)]"
+                >
+                  <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-[var(--primary-light)] text-[var(--primary)]">
+                    <item.icon className="h-4 w-4" />
+                  </div>
+                  <div className="flex-1">
+                    <p className="text-sm font-semibold text-[var(--foreground)]">{item.label}</p>
+                  </div>
+                  <ArrowRight className="h-4 w-4 text-[var(--foreground-subtle)]" />
+                </Link>
+              ))}
+            </div>
+          </section>
+
+          <section className="rounded-[24px] border border-[var(--border)] bg-[var(--surface)] p-6 shadow-[var(--shadow-sm)]">
+            <div className="flex items-center gap-3">
+              <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-[var(--primary-light)] text-[var(--primary)]">
+                <UsersRound className="h-5 w-5" />
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold text-[var(--foreground)]">Buyer readiness snapshot</h2>
+                <p className="text-sm text-[var(--foreground-muted)]">
+                  Profile completion influences how fast you can move from sourcing need to live tender.
+                </p>
+              </div>
+            </div>
+            <div className="mt-4 h-3 overflow-hidden rounded-full bg-[var(--background-muted)]">
+              <div
+                className="h-full rounded-full"
+                style={{
+                  width: `${payload?.summary.profile_completion ?? 0}%`,
+                  background:
+                    "linear-gradient(90deg, color-mix(in oklch, var(--primary) 86%, var(--surface) 14%) 0%, color-mix(in oklch, var(--secondary) 70%, var(--primary) 30%) 100%)",
+                }}
+              />
+            </div>
+            <p className="mt-4 text-sm text-[var(--foreground-muted)]">
+              Completion is currently <strong>{payload?.summary.profile_completion ?? 0}%</strong>.
+              Use onboarding and profile settings to keep the buyer account tender-ready.
+            </p>
+          </section>
         </div>
       </div>
     </div>

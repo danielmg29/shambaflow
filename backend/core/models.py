@@ -22,7 +22,7 @@ Five platform layers, one coherent schema:
   │         CapacityMetric, CapacitySnapshot
   │
   Layer 4 │ Marketplace
-  │         Buyer, Tender, TenderDocument,
+  │         Buyer, TenderMarketplaceAccessPayment, Tender, TenderDocument,
   │         Bid, BidDocument, TenderMessage
   │
   Layer 5 │ Reputation Ledger
@@ -62,7 +62,8 @@ Key design decisions (v2 changes):
   • FormFieldValue is REMOVED — data lives in the actual model tables.
 
   INVARIANTS
-  • No payment logic inside this system.
+  • Cooperative finance logs stay non-transactional; marketplace access
+    payments are tracked separately from CRM financial records.
   • All PKs are UUIDs — safe to expose in URLs.
   • Every model records created_at / updated_at for auditing.
   • Core model fields are immutable — they power marketplace logic
@@ -2095,6 +2096,165 @@ class Buyer(BaseModel):
         return self.profile.company_name if self.profile else self.user.email
 
 
+class TenderMarketplaceBanner(BaseModel):
+    """Promotional content blocks shown inside the standalone tender marketplace."""
+
+    class Placement(models.TextChoices):
+        COOPERATIVE_DISCOVER = "COOPERATIVE_DISCOVER", "Cooperative Discover Page"
+
+    class SurfaceTheme(models.TextChoices):
+        CANOPY = "CANOPY", "Canopy Green"
+        SUNRISE = "SUNRISE", "Sunrise Gold"
+        SKYLINE = "SKYLINE", "Skyline Blue"
+        MIDNIGHT = "MIDNIGHT", "Midnight Slate"
+
+    placement = models.CharField(
+        max_length=32,
+        choices=Placement.choices,
+        default=Placement.COOPERATIVE_DISCOVER,
+        db_index=True,
+        help_text="Where this promotional banner should appear in the marketplace UI.",
+    )
+    eyebrow = models.CharField(
+        max_length=80,
+        blank=True,
+        help_text="Small label shown above the banner title.",
+    )
+    title = models.CharField(max_length=180)
+    body = models.TextField(
+        blank=True,
+        help_text="Supporting copy that explains the promotion or campaign.",
+    )
+    highlight = models.CharField(
+        max_length=120,
+        blank=True,
+        help_text="Optional proof point, stat, or urgency message.",
+    )
+    surface_theme = models.CharField(
+        max_length=16,
+        choices=SurfaceTheme.choices,
+        default=SurfaceTheme.CANOPY,
+    )
+    primary_cta_label = models.CharField(max_length=60, blank=True)
+    primary_cta_href = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Relative ShambaFlow path or full URL for the primary CTA.",
+    )
+    secondary_cta_label = models.CharField(max_length=60, blank=True)
+    secondary_cta_href = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Optional secondary CTA link.",
+    )
+    sort_order = models.PositiveSmallIntegerField(default=0)
+    is_active = models.BooleanField(
+        default=True,
+        help_text="If false, the banner is hidden even if its schedule is valid.",
+    )
+    starts_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Optional publish start. Leave blank to show immediately.",
+    )
+    ends_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Optional publish end. Leave blank to keep showing until disabled.",
+    )
+
+    class Meta:
+        db_table = "sf_tender_marketplace_banners"
+        verbose_name = "Tender Marketplace Banner"
+        verbose_name_plural = "Tender Marketplace Banners"
+        ordering = ["placement", "sort_order", "-created_at"]
+        indexes = [
+            models.Index(fields=["placement", "is_active"]),
+            models.Index(fields=["starts_at"]),
+            models.Index(fields=["ends_at"]),
+        ]
+
+    def __str__(self):
+        return self.title
+
+    def clean(self):
+        super().clean()
+        if self.starts_at and self.ends_at and self.ends_at < self.starts_at:
+            raise ValidationError({"ends_at": "ends_at cannot be earlier than starts_at."})
+
+
+class TenderMarketplaceAccessPayment(BaseModel):
+    """Tracks cooperative-chair payments for tender-marketplace access."""
+
+    class Provider(models.TextChoices):
+        SELLAPAY = "SELLAPAY", "SellaPay"
+
+    class Status(models.TextChoices):
+        PENDING = "PENDING", "Pending Confirmation"
+        ACTIVE = "ACTIVE", "Access Granted"
+        FAILED = "FAILED", "Failed"
+        CANCELLED = "CANCELLED", "Cancelled"
+
+    cooperative = models.ForeignKey(
+        Cooperative,
+        on_delete=models.CASCADE,
+        related_name="marketplace_access_payments",
+    )
+    initiated_by = models.ForeignKey(
+        "User",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="marketplace_access_payments",
+    )
+    provider = models.CharField(
+        max_length=24,
+        choices=Provider.choices,
+        default=Provider.SELLAPAY,
+    )
+    status = models.CharField(
+        max_length=16,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    reference = models.CharField(
+        max_length=32,
+        unique=True,
+        db_index=True,
+        help_text="Internal reference passed to the payment provider.",
+    )
+    amount_kes = models.DecimalField(max_digits=10, decimal_places=2)
+    phone_number = models.CharField(
+        max_length=20,
+        help_text="Phone number used for the STK push request.",
+    )
+    normalized_phone = models.CharField(
+        max_length=9,
+        blank=True,
+        help_text="Provider-ready local phone format, e.g. 712345678.",
+    )
+    description = models.CharField(max_length=255, blank=True)
+    provider_transaction_id = models.CharField(max_length=80, blank=True, db_index=True)
+    provider_message = models.CharField(max_length=255, blank=True)
+    provider_response = models.JSONField(default=dict, blank=True)
+    activated_at = models.DateTimeField(null=True, blank=True)
+    access_expires_at = models.DateTimeField(null=True, blank=True, db_index=True)
+
+    class Meta:
+        db_table = "sf_tender_marketplace_access_payments"
+        verbose_name = "Tender Marketplace Access Payment"
+        verbose_name_plural = "Tender Marketplace Access Payments"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["cooperative", "status"]),
+            models.Index(fields=["cooperative", "access_expires_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.cooperative.name} · {self.reference} · {self.get_status_display()}"
+
+
 class Tender(BaseModel):
     """A structured sourcing request posted by a Buyer."""
 
@@ -2268,6 +2428,14 @@ class BidDocument(BaseModel):
 
 class TenderMessage(BaseModel):
     """In-platform messaging between Buyer and Cooperative, scoped to a Tender."""
+
+    class MessageType(models.TextChoices):
+        TEXT = "TEXT", "Text"
+        IMAGE = "IMAGE", "Image"
+        VIDEO = "VIDEO", "Video"
+        AUDIO = "AUDIO", "Audio"
+        DOCUMENT = "DOCUMENT", "Document"
+
     tender                = models.ForeignKey(
         Tender, on_delete=models.CASCADE, related_name="messages"
     )
@@ -2282,7 +2450,14 @@ class TenderMessage(BaseModel):
         related_name="received_messages",
         help_text="Null when the sender is the cooperative (message is directed to the buyer).",
     )
-    body       = models.TextField()
+    body       = models.TextField(blank=True)
+    message_type = models.CharField(
+        max_length=12,
+        choices=MessageType.choices,
+        default=MessageType.TEXT,
+        db_index=True,
+    )
+    metadata   = models.JSONField(default=dict, blank=True)
     is_read    = models.BooleanField(default=False)
     read_at    = models.DateTimeField(null=True, blank=True)
     attachment = models.FileField(
@@ -2295,6 +2470,7 @@ class TenderMessage(BaseModel):
         ordering     = ["created_at"]
         indexes      = [
             models.Index(fields=["tender", "sender"]),
+            models.Index(fields=["tender", "recipient_cooperative"]),
             models.Index(fields=["is_read"]),
         ]
 

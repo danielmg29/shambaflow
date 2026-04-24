@@ -25,6 +25,12 @@ def _get_brevo_client():
     )
 
 
+def _looks_like_brevo_smtp_login(address: str | None) -> bool:
+    if not address:
+        return False
+    return address.strip().lower().endswith("@smtp-brevo.com")
+
+
 # ─────────────────────────────────────────
 # CORE SEND FUNCTION
 # ─────────────────────────────────────────
@@ -50,6 +56,16 @@ def send_email(
     Returns:
         True on success, False on failure.
     """
+    if _looks_like_brevo_smtp_login(settings.BREVO_SENDER_EMAIL):
+        logger.error(
+            "Brevo sender misconfigured: BREVO_SENDER_EMAIL=%s looks like the SMTP login. "
+            "Use a verified sender address from your own authenticated domain instead, "
+            "and keep the SMTP login in BREVO_SMTP_LOGIN. "
+            "If you recently changed backend/.env, restart the Django process so the new settings are loaded.",
+            settings.BREVO_SENDER_EMAIL,
+        )
+        return False
+
     try:
         api_instance = _get_brevo_client()
 

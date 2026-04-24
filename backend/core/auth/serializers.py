@@ -16,6 +16,7 @@ Covers:
 import hashlib
 import secrets
 import logging
+from django.core.exceptions import ObjectDoesNotExist
 from django.contrib.auth import get_user_model
 from django.conf import settings
 from django.utils import timezone
@@ -26,6 +27,18 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 logger = logging.getLogger('shambaflow')
 User = get_user_model()
+
+
+def _absolute_media_url(request, file_field) -> str | None:
+    if not file_field:
+        return None
+    try:
+        url = file_field.url
+    except Exception:
+        return None
+    if request is None or str(url).startswith(("http://", "https://")):
+        return url
+    return request.build_absolute_uri(url)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -62,6 +75,7 @@ class ShambaFlowTokenObtainSerializer(TokenObtainPairSerializer):
     def validate(self, attrs):
         data = super().validate(attrs)
         user = self.user
+        request = self.context.get("request")
 
         # Gate: email must be verified
         if not user.is_email_verified:
@@ -72,6 +86,8 @@ class ShambaFlowTokenObtainSerializer(TokenObtainPairSerializer):
 
         permissions_map = {}
         cooperative_name = None
+        company_name = None
+        avatar_url = None
         if user.cooperative_id:
             cooperative_name = getattr(user.cooperative, "name", None)
             if user.is_chair:
@@ -106,15 +122,28 @@ class ShambaFlowTokenObtainSerializer(TokenObtainPairSerializer):
                         "can_edit_templates": perm["can_edit_templates"],
                     }
 
+        try:
+            if user.is_buyer:
+                company_name = user.buyer_profile.company_name
+                avatar_url = _absolute_media_url(request, user.buyer_profile.company_logo)
+            elif user.is_chair:
+                avatar_url = _absolute_media_url(request, user.chair_profile.profile_photo)
+        except ObjectDoesNotExist:
+            pass
+
         # Enrich response body (beyond just access/refresh tokens)
         data['user'] = {
             'id':                  str(user.id),
             'email':               user.email,
+            'first_name':          user.first_name,
+            'last_name':           user.last_name,
             'full_name':           user.full_name,
             'user_type':           user.user_type,
             'must_change_password': user.must_change_password,
             'cooperative_id':      str(user.cooperative_id) if user.cooperative_id else None,
             'cooperative_name':    cooperative_name,
+            'company_name':        company_name,
+            'avatar_url':          avatar_url,
             'helper_role':         user.helper_role or None,
             'is_email_verified':   user.is_email_verified,
             'is_phone_verified':   user.is_phone_verified,

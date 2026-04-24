@@ -243,3 +243,41 @@
     letter-spacing: var(--tracking-normal);
   }
 }
+
+@layer components {
+  .sf-tone-success {
+    border-color: color-mix(in oklch, var(--success) 26%, var(--border));
+    background-color: color-mix(in oklch, var(--success) 14%, var(--surface));
+    color: var(--success);
+  }
+
+  .sf-tone-warning {
+    border-color: color-mix(in oklch, var(--warning) 28%, var(--border));
+    background-color: color-mix(in oklch, var(--warning) 16%, var(--surface));
+    color: var(--warning);
+  }
+
+  .sf-tone-info {
+    border-color: color-mix(in oklch, var(--info) 28%, var(--border));
+    background-color: color-mix(in oklch, var(--info) 15%, var(--surface));
+    color: var(--info);
+  }
+
+  .sf-tone-danger {
+    border-color: color-mix(in oklch, var(--destructive) 26%, var(--border));
+    background-color: color-mix(in oklch, var(--destructive) 14%, var(--surface));
+    color: var(--destructive);
+  }
+
+  .sf-tone-neutral {
+    border-color: color-mix(in oklch, var(--foreground-muted) 20%, var(--border));
+    background-color: color-mix(in oklch, var(--background-muted) 72%, var(--surface));
+    color: var(--foreground-muted);
+  }
+
+  .sf-hero-panel {
+    border: 1px solid color-mix(in oklch, var(--surface) 22%, transparent);
+    background: color-mix(in oklch, var(--surface) 14%, transparent);
+    backdrop-filter: blur(14px);
+  }
+}

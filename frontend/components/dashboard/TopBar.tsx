@@ -17,6 +17,7 @@ import {
   Menu, Bell, LogOut, User, Settings, ChevronDown,
   Sprout, Building2,
 } from "lucide-react";
+import MarketplaceChatLauncher from "@/components/marketplace/MarketplaceChatLauncher";
 import { ThemeToggle } from "@/components/providers/ThemeToggle";
 import {
   USER_UPDATED_EVENT,
@@ -185,10 +186,10 @@ export function TopBar({ onMenuClick, title, variant = "crm", cooperativeId }: T
     : "/marketplace/profile";
   const settingsHref = variant === "crm"
     ? `/crm/${cooperativeId}/settings`
-    : "/marketplace/profile";
+    : "/marketplace/settings";
   const notificationSettingsHref = variant === "crm"
     ? `/crm/${cooperativeId}/settings`
-    : "/marketplace/profile";
+    : "/marketplace/settings";
 
   const handleNotificationClick = async (notification: NotificationItem) => {
     if (!notification.is_read) {
@@ -239,6 +240,12 @@ export function TopBar({ onMenuClick, title, variant = "crm", cooperativeId }: T
       <div className="flex items-center gap-1.5 sm:gap-2">
         {/* Theme toggle — always visible */}
         <ThemeToggle size="md" />
+
+        <MarketplaceChatLauncher
+          variant={variant}
+          cooperativeId={cooperativeId}
+          user={user}
+        />
 
         {/* Notifications */}
         <div className="relative" ref={notifRef}>

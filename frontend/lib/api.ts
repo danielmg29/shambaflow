@@ -51,15 +51,28 @@ export interface ModulePermissionFlags {
   can_edit_templates?: boolean;
 }
 
+export interface CooperativeSnapshot {
+  name: string;
+  registration_number: string;
+  verification_status: string;
+  subscription_tier: string;
+  cooperative_type: string;
+  region: string;
+  total_members: number;
+  is_verified: boolean;
+}
+
 export interface UserSnapshot {
   id: string;
   email: string;
   first_name?: string;
   last_name?: string;
   full_name?: string;
+  phone_number?: string;
   user_type: "CHAIR" | "HELPER" | "BUYER" | "PLATFORM";
   must_change_password?: boolean;
   cooperative_id: string | null;
+  cooperative?: CooperativeSnapshot | null;
   cooperative_name?: string | null;
   company_name?: string | null;
   avatar_url?: string | null;

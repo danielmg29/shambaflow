@@ -614,6 +614,7 @@ def me_view(request):
                 "tax_pin",
                 "country",
                 "region",
+                "physical_address",
                 "website",
                 "description",
             ]:
@@ -685,6 +686,10 @@ def _get_chair_profile(user, request=None) -> dict | None:
 def _get_buyer_profile(user, request=None) -> dict | None:
     try:
         p = user.buyer_profile
+        try:
+            total_tenders = user.buyer.tenders.count()
+        except Exception:
+            total_tenders = p.total_tenders
         return {
             'company_name': p.company_name,
             'buyer_type': p.buyer_type,
@@ -692,13 +697,14 @@ def _get_buyer_profile(user, request=None) -> dict | None:
             'tax_pin': p.tax_pin,
             'country': p.country,
             'region': p.region,
+            'physical_address': p.physical_address,
             'website': p.website,
             'description': p.description,
             'is_verified': p.is_verified,
             'interested_categories': p.interested_categories,
             'preferred_regions': p.preferred_regions,
             'average_rating': str(p.average_rating),
-            'total_tenders': p.total_tenders,
+            'total_tenders': total_tenders,
             'email_notifications': p.email_notifications,
             'sms_notifications': p.sms_notifications,
             'company_logo': _absolute_media_url(request, p.company_logo),

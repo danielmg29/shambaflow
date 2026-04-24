@@ -1,546 +1,582 @@
 "use client";
 
-/**
- * Marketplace Profile Page — Buyer
- *
- * Sections:
- * 1. Company info + logo upload
- * 2. Business details (type, registration, tax pin)
- * 3. Sourcing preferences (categories, regions)
- * 4. Notification preferences
- * 5. Security (change password)
- *
- * Responsive: single-column on mobile, two-column on desktop.
- */
-
-import { useState, useEffect, useCallback } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import {
-  Building2, Mail, Phone, Globe, FileText, MapPin,
-  Bell, Shield, Camera, Loader2, CheckCircle, AlertCircle,
-  Eye, EyeOff, Tag, User,
+  Building2,
+  Camera,
+  CheckCircle2,
+  Globe,
+  Loader2,
+  Mail,
+  MapPin,
+  ShieldCheck,
+  Sparkles,
+  Tag,
+  Trash2,
 } from "lucide-react";
-import { authApi, getUser } from "@/lib/api";
-import { cn } from "@/lib/utils";
+
 import { AnimatedAlert } from "@/components/ui/animated-alert";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
+import { authApi, saveUser } from "@/lib/api";
+import { formatDecimal } from "@/lib/marketplace";
+import { cn } from "@/lib/utils";
 
-/* ─── Types ───────────────────────────────────────────────────────── */
-
-interface BuyerProfile {
-  id:               string;
-  email:            string;
-  full_name:        string;
-  user_type:        string;
-  is_email_verified:boolean;
+interface BuyerProfileResponse {
+  id: string;
+  email: string;
+  first_name: string;
+  last_name: string;
+  full_name: string;
+  is_email_verified: boolean;
+  phone_number: string;
   profile?: {
-    company_name:        string;
-    buyer_type:          string;
+    company_name: string;
+    buyer_type: string;
     registration_number: string;
-    tax_pin:             string;
-    country:             string;
-    region:              string;
-    website:             string;
-    description:         string;
-    is_verified:         boolean;
+    tax_pin: string;
+    country: string;
+    region: string;
+    physical_address: string;
+    website: string;
+    description: string;
+    company_logo?: string | null;
     interested_categories: string[];
-    preferred_regions:   string[];
-    average_rating:      string;
-    total_tenders:       number;
-    email_notifications: boolean;
-    sms_notifications:   boolean;
-    company_logo?:       string | null;
+    preferred_regions: string[];
+    average_rating: string;
+    total_tenders: number;
+    is_verified: boolean;
   };
 }
 
 const BUYER_TYPES = [
-  { value: "PROCESSOR",  label: "Processor / Manufacturer" },
-  { value: "RETAILER",   label: "Retailer / Supermarket" },
-  { value: "EXPORTER",   label: "Exporter" },
-  { value: "NGO",        label: "NGO / Development Organisation" },
+  { value: "PROCESSOR", label: "Processor / Manufacturer" },
+  { value: "RETAILER", label: "Retailer / Supermarket" },
+  { value: "EXPORTER", label: "Exporter" },
+  { value: "NGO", label: "NGO / Development Organisation" },
   { value: "GOVERNMENT", label: "Government Agency" },
-  { value: "TRADER",     label: "Commodity Trader" },
-  { value: "OTHER",      label: "Other" },
+  { value: "TRADER", label: "Commodity Trader" },
+  { value: "OTHER", label: "Other" },
 ];
 
-const CATEGORIES = [
-  "Maize", "Wheat", "Rice", "Beans", "Potatoes", "Tomatoes", "Onions",
-  "Dairy", "Beef", "Poultry", "Fish", "Honey", "Coffee", "Tea", "Other",
+const CATEGORY_OPTIONS = [
+  { value: "CEREALS", label: "Cereals & Grains" },
+  { value: "VEGETABLES", label: "Vegetables" },
+  { value: "FRUITS", label: "Fruits" },
+  { value: "DAIRY", label: "Dairy Products" },
+  { value: "MEAT", label: "Meat & Poultry" },
+  { value: "PULSES", label: "Pulses & Legumes" },
+  { value: "CASH_CROPS", label: "Cash Crops" },
+  { value: "HORTICULTURE", label: "Horticulture" },
+  { value: "OTHER", label: "Other" },
 ];
 
-/* ─── Sub-components ──────────────────────────────────────────────── */
+const buyerProfileHeroStyle = {
+  background:
+    "radial-gradient(circle at top left, color-mix(in oklch, var(--surface) 18%, transparent) 0%, transparent 28%), linear-gradient(135deg, color-mix(in oklch, var(--foreground) 76%, var(--primary) 24%) 0%, color-mix(in oklch, var(--primary) 70%, var(--foreground) 30%) 44%, color-mix(in oklch, var(--primary-light) 78%, var(--surface) 22%) 100%)",
+  boxShadow: "0 24px 60px color-mix(in oklch, var(--foreground) 16%, transparent)",
+};
 
-function Section({ title, description, icon: Icon, children }: {
-  title: string; description?: string; icon?: React.ElementType; children: React.ReactNode;
+function Section({
+  title,
+  description,
+  icon: Icon,
+  children,
+}: {
+  title: string;
+  description: string;
+  icon: React.ElementType;
+  children: React.ReactNode;
 }) {
   return (
-    <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] overflow-hidden">
-      <div className="px-6 py-5 border-b border-[var(--border)] flex items-start gap-3">
-        {Icon && (
-          <div className="w-9 h-9 rounded-xl bg-[var(--primary-light)] flex items-center justify-center shrink-0 mt-0.5">
-            <Icon className="w-4.5 h-4.5 text-[var(--primary)]" />
+    <Card className="rounded-[24px] border border-[var(--border)] bg-[var(--surface)] py-0 shadow-[var(--shadow-sm)]">
+      <CardContent className="p-6">
+        <div className="mb-5 flex items-start gap-3">
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-[var(--primary-light)] text-[var(--primary)]">
+            <Icon className="h-5 w-5" />
           </div>
-        )}
-        <div>
-          <h3 className="text-base font-semibold text-[var(--foreground)]">{title}</h3>
-          {description && <p className="text-xs text-[var(--foreground-muted)] mt-0.5">{description}</p>}
+          <div>
+            <h2 className="text-lg font-semibold text-[var(--foreground)]">{title}</h2>
+            <p className="text-sm text-[var(--foreground-muted)]">{description}</p>
+          </div>
         </div>
-      </div>
-      <div className="px-6 py-5">{children}</div>
-    </div>
+        {children}
+      </CardContent>
+    </Card>
   );
 }
 
-function FormField({
-  label, id, type = "text", value, onChange, placeholder, disabled, hint,
-}: {
-  label: string; id: string; type?: string; value: string;
-  onChange?: (v: string) => void; placeholder?: string; disabled?: boolean; hint?: string;
-}) {
-  return (
-    <div className="space-y-1.5">
-      <label htmlFor={id} className="block text-sm font-medium text-[var(--foreground)]">{label}</label>
-      <input
-        id={id} type={type} value={value} onChange={(e) => onChange?.(e.target.value)}
-        placeholder={placeholder} disabled={disabled}
-        className={cn(
-          "w-full h-11 px-4 rounded-xl border text-sm transition-all duration-150",
-          disabled
-            ? "bg-[var(--background-muted)] text-[var(--foreground-muted)] cursor-default border-[var(--border)]"
-            : "bg-[var(--input-bg)] text-[var(--input-text)] border-[var(--input-border)] focus:border-[var(--input-border-focus)] focus:ring-2 focus:ring-[var(--border-focus)] focus:outline-none"
-        )}
-      />
-      {hint && <p className="text-xs text-[var(--foreground-subtle)]">{hint}</p>}
-    </div>
-  );
+function FieldLabel({ children }: { children: React.ReactNode }) {
+  return <Label className="text-sm font-medium text-[var(--foreground)]">{children}</Label>;
 }
-
-function Toast({
-  toast,
-  onClose,
-}: {
-  toast: { message: string; type: "success" | "error" } | null;
-  onClose: () => void;
-}) {
-  useEffect(() => {
-    if (!toast) return;
-    const t = setTimeout(onClose, 4000);
-    return () => clearTimeout(t);
-  }, [toast, onClose]);
-
-  return (
-    <AnimatedAlert
-      show={Boolean(toast)}
-      motionKey={toast?.message ?? "toast"}
-      offsetY={8}
-      className={cn(
-        "fixed bottom-6 right-6 z-50 flex items-center gap-3 px-4 py-3 rounded-xl shadow-[var(--shadow-xl)] border max-w-sm",
-        toast?.type === "success"
-          ? "bg-[var(--success-light)] border-green-200 text-[var(--success)] dark:border-green-900/40"
-          : "bg-[var(--destructive-light)] border-red-200 text-[var(--destructive)] dark:border-red-900/40"
-      )}
-    >
-      {toast?.type === "success" ? (
-        <CheckCircle className="w-4 h-4 shrink-0" />
-      ) : (
-        <AlertCircle className="w-4 h-4 shrink-0" />
-      )}
-      <p className="text-sm font-medium">{toast?.message ?? ""}</p>
-    </AnimatedAlert>
-  );
-}
-
-/* ─── Main Page ───────────────────────────────────────────────────── */
 
 export default function MarketplaceProfilePage() {
-  const [profile, setProfile] = useState<BuyerProfile | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [profile, setProfile] = useState<BuyerProfileResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [saving,  setSaving]  = useState(false);
-  const [toast,   setToast]   = useState<{ message: string; type: "success"|"error" } | null>(null);
-  const closeToast = useCallback(() => setToast(null), []);
+  const [saving, setSaving] = useState(false);
+  const [logoSaving, setLogoSaving] = useState(false);
+  const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
-  // Company info
-  const [companyName,  setCompanyName]  = useState("");
-  const [buyerType,    setBuyerType]    = useState("RETAILER");
-  const [regNumber,    setRegNumber]    = useState("");
-  const [taxPin,       setTaxPin]       = useState("");
-  const [country,      setCountry]      = useState("Kenya");
-  const [region,       setRegion]       = useState("");
-  const [website,      setWebsite]      = useState("");
-  const [description,  setDescription]  = useState("");
+  const [companyName, setCompanyName] = useState("");
+  const [buyerType, setBuyerType] = useState("RETAILER");
+  const [registrationNumber, setRegistrationNumber] = useState("");
+  const [taxPin, setTaxPin] = useState("");
+  const [country, setCountry] = useState("Kenya");
+  const [region, setRegion] = useState("");
+  const [physicalAddress, setPhysicalAddress] = useState("");
+  const [website, setWebsite] = useState("");
+  const [description, setDescription] = useState("");
+  const [categories, setCategories] = useState<string[]>([]);
+  const [preferredRegions, setPreferredRegions] = useState("");
 
-  // Sourcing prefs
-  const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
-  const [preferredRegions,   setPreferredRegions]   = useState("");
-
-  // Notifications
-  const [emailNotifs, setEmailNotifs] = useState(true);
-  const [smsNotifs,   setSmsNotifs]   = useState(true);
-
-  // Password
-  const [currentPwd, setCurrentPwd] = useState("");
-  const [newPwd,     setNewPwd]     = useState("");
-  const [cfmPwd,     setCfmPwd]     = useState("");
-  const [showPwd,    setShowPwd]    = useState(false);
-  const [pwdLoading, setPwdLoading] = useState(false);
-  const [pwdError,   setPwdError]   = useState<string | null>(null);
-
-  useEffect(() => {
-    authApi.me()
-      .then((data: BuyerProfile) => {
-        setProfile(data);
-        const p = data.profile;
-        if (p) {
-          setCompanyName(p.company_name ?? "");
-          setBuyerType(p.buyer_type ?? "RETAILER");
-          setRegNumber(p.registration_number ?? "");
-          setTaxPin(p.tax_pin ?? "");
-          setCountry(p.country ?? "Kenya");
-          setRegion(p.region ?? "");
-          setWebsite(p.website ?? "");
-          setDescription(p.description ?? "");
-          setSelectedCategories(p.interested_categories ?? []);
-          setPreferredRegions((p.preferred_regions ?? []).join(", "));
-          setEmailNotifs(p.email_notifications ?? true);
-          setSmsNotifs(p.sms_notifications ?? true);
-        }
-      })
-      .catch(console.error)
-      .finally(() => setLoading(false));
+  const applyProfile = useCallback((data: BuyerProfileResponse) => {
+    setProfile(data);
+    setCompanyName(data.profile?.company_name ?? "");
+    setBuyerType(data.profile?.buyer_type ?? "RETAILER");
+    setRegistrationNumber(data.profile?.registration_number ?? "");
+    setTaxPin(data.profile?.tax_pin ?? "");
+    setCountry(data.profile?.country ?? "Kenya");
+    setRegion(data.profile?.region ?? "");
+    setPhysicalAddress(data.profile?.physical_address ?? "");
+    setWebsite(data.profile?.website ?? "");
+    setDescription(data.profile?.description ?? "");
+    setCategories(data.profile?.interested_categories ?? []);
+    setPreferredRegions((data.profile?.preferred_regions ?? []).join(", "));
   }, []);
 
-  const handleSaveProfile = useCallback(async () => {
-    setSaving(true);
-    try {
-      await authApi.updateMe({
-        company_name:        companyName.trim(),
-        buyer_type:          buyerType,
-        registration_number: regNumber.trim(),
-        tax_pin:             taxPin.trim(),
-        country:             country.trim(),
-        region:              region.trim(),
-        website:             website.trim(),
-        description:         description.trim(),
-        interested_categories: selectedCategories,
-        preferred_regions:   preferredRegions.split(",").map((r) => r.trim()).filter(Boolean),
-      });
-      setToast({ message: "Profile updated successfully.", type: "success" });
-    } catch {
-      setToast({ message: "Failed to update profile.", type: "error" });
-    } finally {
-      setSaving(false);
-    }
-  }, [companyName, buyerType, regNumber, taxPin, country, region, website, description, selectedCategories, preferredRegions]);
+  const loadProfile = useCallback(async () => {
+    const data = await authApi.me() as BuyerProfileResponse;
+    saveUser(data);
+    applyProfile(data);
+    return data;
+  }, [applyProfile]);
 
-  const handleSaveNotifs = useCallback(async () => {
-    setSaving(true);
-    try {
-      await authApi.updateMe({ email_notifications: emailNotifs, sms_notifications: smsNotifs });
-      setToast({ message: "Notification preferences saved.", type: "success" });
-    } catch {
-      setToast({ message: "Failed to save preferences.", type: "error" });
-    } finally {
-      setSaving(false);
-    }
-  }, [emailNotifs, smsNotifs]);
+  useEffect(() => {
+    loadProfile()
+      .catch(() => setMessage({ type: "error", text: "Unable to load the buyer profile right now." }))
+      .finally(() => setLoading(false));
+  }, [loadProfile]);
 
-  const handleChangePassword = useCallback(async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (newPwd !== cfmPwd) { setPwdError("Passwords do not match."); return; }
-    if (newPwd.length < 8) { setPwdError("Password must be at least 8 characters."); return; }
-    setPwdError(null);
-    setPwdLoading(true);
-    try {
-      await authApi.changePassword(currentPwd, newPwd, cfmPwd);
-      setCurrentPwd(""); setNewPwd(""); setCfmPwd("");
-      setToast({ message: "Password changed successfully.", type: "success" });
-    } catch (err: any) {
-      setPwdError(err?.message ?? "Failed to change password.");
-    } finally {
-      setPwdLoading(false);
-    }
-  }, [currentPwd, newPwd, cfmPwd]);
+  const initials = useMemo(() => {
+    const source = companyName || profile?.full_name || profile?.email || "B";
+    return source
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((item) => item.charAt(0))
+      .join("")
+      .toUpperCase();
+  }, [companyName, profile?.email, profile?.full_name]);
 
-  const toggleCategory = (cat: string) => {
-    setSelectedCategories((prev) =>
-      prev.includes(cat) ? prev.filter((c) => c !== cat) : [...prev, cat]
+  const toggleCategory = (value: string) => {
+    setCategories((current) =>
+      current.includes(value)
+        ? current.filter((item) => item !== value)
+        : [...current, value]
     );
   };
 
+  const handleSaveProfile = useCallback(async () => {
+    setSaving(true);
+    setMessage(null);
+    try {
+      const response = await authApi.updateMe({
+        company_name: companyName.trim(),
+        buyer_type: buyerType,
+        registration_number: registrationNumber.trim(),
+        tax_pin: taxPin.trim(),
+        country: country.trim(),
+        region: region.trim(),
+        physical_address: physicalAddress.trim(),
+        website: website.trim(),
+        description: description.trim(),
+        interested_categories: categories,
+        preferred_regions: preferredRegions
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean),
+      }) as Record<string, unknown>;
+      saveUser(response);
+      await loadProfile();
+      setMessage({ type: "success", text: "Buyer profile updated successfully." });
+    } catch {
+      setMessage({ type: "error", text: "We could not save the buyer profile. Please try again." });
+    } finally {
+      setSaving(false);
+    }
+  }, [
+    buyerType,
+    categories,
+    companyName,
+    country,
+    description,
+    loadProfile,
+    physicalAddress,
+    preferredRegions,
+    region,
+    registrationNumber,
+    taxPin,
+    website,
+  ]);
+
+  const handleLogoSelected = useCallback(async (file: File | null) => {
+    if (!file) return;
+    setLogoSaving(true);
+    setMessage(null);
+    try {
+      const formData = new FormData();
+      formData.append("company_logo", file);
+      const response = await authApi.updateMe(formData) as Record<string, unknown>;
+      saveUser(response);
+      await loadProfile();
+      setMessage({ type: "success", text: "Company logo updated." });
+    } catch {
+      setMessage({ type: "error", text: "Company logo upload failed. Please try another file." });
+    } finally {
+      setLogoSaving(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }, [loadProfile]);
+
+  const handleRemoveLogo = useCallback(async () => {
+    setLogoSaving(true);
+    setMessage(null);
+    try {
+      const response = await authApi.updateMe({ remove_company_logo: true }) as Record<string, unknown>;
+      saveUser(response);
+      await loadProfile();
+      setMessage({ type: "success", text: "Company logo removed." });
+    } catch {
+      setMessage({ type: "error", text: "We could not remove the company logo." });
+    } finally {
+      setLogoSaving(false);
+    }
+  }, [loadProfile]);
+
   if (loading) {
     return (
-      <div className="max-w-3xl space-y-5">
-        {Array.from({ length: 3 }, (_, i) => (
-          <div key={i} className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-6 animate-pulse">
-            <div className="h-5 w-40 bg-[var(--background-muted)] rounded mb-5" />
-            <div className="grid grid-cols-2 gap-4">
-              {Array.from({ length: 4 }, (_, j) => (
-                <div key={j} className="space-y-2">
-                  <div className="h-3 w-20 bg-[var(--background-muted)] rounded" />
-                  <div className="h-10 bg-[var(--background-muted)] rounded-xl" />
-                </div>
-              ))}
-            </div>
-          </div>
-        ))}
+      <div className="flex min-h-[60vh] items-center justify-center">
+        <div className="flex items-center gap-3 rounded-full border border-[var(--border)] bg-[var(--surface)] px-5 py-3 text-sm text-[var(--foreground-muted)]">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Loading buyer profile…
+        </div>
       </div>
     );
   }
 
-  const initials = profile?.full_name
-    ? profile.full_name.split(" ").map((n) => n[0]).slice(0, 2).join("").toUpperCase()
-    : (companyName?.[0]?.toUpperCase() ?? "B");
-
   return (
-    <div className="max-w-3xl space-y-6">
-      {/* Header */}
-      <div>
-        <h2 className="text-2xl font-bold text-[var(--foreground)] font-[var(--font-sans)]">Buyer Profile</h2>
-        <p className="text-sm text-[var(--foreground-muted)] mt-0.5">
-          Manage your company information and sourcing preferences.
-        </p>
-      </div>
-
-      {/* Company header card */}
-      <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-6">
-        <div className="flex flex-col sm:flex-row items-center sm:items-start gap-5">
-          {/* Logo / Avatar */}
-          <div className="relative group shrink-0">
-            <div
-              className="w-20 h-20 rounded-2xl bg-[var(--primary)] text-white
-                         flex items-center justify-center text-2xl font-bold shadow-[var(--shadow-md)]"
-            >
-              {profile?.profile?.company_logo ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={profile.profile.company_logo} alt="Logo" className="w-full h-full rounded-2xl object-cover" />
-              ) : initials}
+    <div className="space-y-8">
+      <section
+        className="overflow-hidden rounded-[28px] border border-[var(--border)] p-6 sm:p-8"
+        style={buyerProfileHeroStyle}
+      >
+        <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
+          <div className="flex flex-col gap-5 sm:flex-row sm:items-start">
+            <div className="relative shrink-0">
+              <div className="sf-hero-panel flex h-24 w-24 items-center justify-center overflow-hidden rounded-[24px] text-2xl font-bold text-white shadow-[0_16px_36px_rgba(0,0,0,0.2)]">
+                {profile?.profile?.company_logo ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={profile.profile.company_logo} alt="Company logo" className="h-full w-full object-cover" />
+                ) : (
+                  initials
+                )}
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(event) => void handleLogoSelected(event.target.files?.[0] ?? null)}
+              />
             </div>
-            <button
-              className="absolute inset-0 rounded-2xl bg-black/40 text-white flex items-center justify-center
-                         opacity-0 group-hover:opacity-100 transition-opacity"
-              title="Upload company logo"
-            >
-              <Camera className="w-5 h-5" />
-            </button>
-          </div>
-
-          <div className="flex-1 text-center sm:text-left">
-            <h3 className="text-xl font-bold text-[var(--foreground)]">{companyName || profile?.full_name}</h3>
-            <p className="text-sm text-[var(--foreground-muted)] mt-0.5">
-              {BUYER_TYPES.find((t) => t.value === buyerType)?.label ?? buyerType}
-            </p>
-            <p className="text-sm text-[var(--foreground-muted)] mt-1 flex items-center justify-center sm:justify-start gap-1.5">
-              <Mail className="w-3.5 h-3.5" />
-              {profile?.email}
-              {profile?.is_email_verified && (
-                <span className="px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-[var(--success-light)] text-[var(--success)]">
-                  Verified
-                </span>
-              )}
-            </p>
-          </div>
-
-          {/* Stats */}
-          <div className="flex gap-4 sm:flex-col sm:gap-2 text-center sm:text-right">
-            <div>
-              <p className="text-xl font-bold text-[var(--foreground)] font-[var(--font-sans)]">
-                {profile?.profile?.total_tenders ?? 0}
-              </p>
-              <p className="text-xs text-[var(--foreground-muted)]">Tenders</p>
-            </div>
-            <div>
-              <p className="text-xl font-bold text-[var(--foreground)] font-[var(--font-sans)]">
-                {profile?.profile?.average_rating ?? "—"}
-              </p>
-              <p className="text-xs text-[var(--foreground-muted)]">Avg. Rating</p>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Company Info */}
-      <Section title="Company Information" description="Update your business registration details." icon={Building2}>
-        <div className="space-y-4">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <FormField label="Company Name" id="companyName" value={companyName} onChange={setCompanyName} placeholder="Nairobi Fresh Markets Ltd" />
-            <div className="space-y-1.5">
-              <label htmlFor="buyerType" className="block text-sm font-medium text-[var(--foreground)]">Buyer Category</label>
-              <select
-                id="buyerType"
-                value={buyerType}
-                onChange={(e) => setBuyerType(e.target.value)}
-                className="w-full h-11 px-4 rounded-xl border text-sm bg-[var(--input-bg)] text-[var(--input-text)]
-                           border-[var(--input-border)] focus:border-[var(--input-border-focus)]
-                           focus:ring-2 focus:ring-[var(--border-focus)] focus:outline-none"
-              >
-                {BUYER_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
-              </select>
-            </div>
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <FormField label="Email Address" id="bEmail" type="email" value={profile?.email ?? ""} disabled hint="Cannot be changed" />
-            <FormField label="Registration Number" id="regNum" value={regNumber} onChange={setRegNumber} placeholder="e.g. CPR/2019/000456" />
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <FormField label="KRA PIN / Tax ID" id="taxPin" value={taxPin} onChange={setTaxPin} placeholder="e.g. A001234567Z" />
-            <FormField label="Country" id="country" value={country} onChange={setCountry} placeholder="Kenya" />
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <FormField label="Region" id="region" value={region} onChange={setRegion} placeholder="e.g. Nairobi County" />
-            <FormField label="Website" id="website" type="url" value={website} onChange={setWebsite} placeholder="https://yourcompany.co.ke" />
-          </div>
-          <div className="space-y-1.5">
-            <label htmlFor="description" className="block text-sm font-medium text-[var(--foreground)]">Company Description</label>
-            <textarea
-              id="description" rows={3} value={description} onChange={(e) => setDescription(e.target.value)}
-              placeholder="Briefly describe your company and sourcing needs…"
-              className="w-full px-4 py-3 rounded-xl border text-sm resize-none
-                         bg-[var(--input-bg)] text-[var(--input-text)] border-[var(--input-border)]
-                         focus:border-[var(--input-border-focus)] focus:ring-2 focus:ring-[var(--border-focus)]
-                         focus:outline-none placeholder:text-[var(--input-placeholder)]"
-            />
-          </div>
-          <div className="flex justify-end">
-            <button
-              onClick={handleSaveProfile} disabled={saving}
-              className="flex items-center gap-2 px-5 h-10 rounded-xl text-sm font-semibold
-                         bg-[var(--primary)] text-[var(--primary-fg)] hover:bg-[var(--primary-hover)]
-                         shadow-[var(--shadow-green)] disabled:opacity-50 transition-all duration-200"
-            >
-              {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
-              Save changes
-            </button>
-          </div>
-        </div>
-      </Section>
-
-      {/* Sourcing Preferences */}
-      <Section title="Sourcing Preferences" description="Tell cooperatives what you're looking to source." icon={Tag}>
-        <div className="space-y-4">
-          <div>
-            <p className="text-sm font-medium text-[var(--foreground)] mb-2">Interested categories</p>
-            <div className="flex flex-wrap gap-2">
-              {CATEGORIES.map((cat) => (
-                <button
-                  key={cat}
-                  onClick={() => toggleCategory(cat)}
+            <div className="space-y-3">
+              <div className="sf-hero-panel inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-white/92">
+                <Building2 className="h-3.5 w-3.5" />
+                Buyer Profile
+              </div>
+              <div>
+                <h1 className="text-3xl font-bold tracking-tight text-white">
+                  {companyName || profile?.full_name || "Buyer account"}
+                </h1>
+                <p className="mt-2 max-w-2xl text-sm leading-6 text-white/82">
+                  Keep your company story, sourcing preferences, and buyer identity current so cooperatives can trust the tenders you publish.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge
                   className={cn(
-                    "px-3 py-1.5 rounded-full text-xs font-medium border transition-all duration-150",
-                    selectedCategories.includes(cat)
-                      ? "bg-[var(--primary)] text-[var(--primary-fg)] border-[var(--primary)]"
-                      : "bg-[var(--surface)] text-[var(--foreground-muted)] border-[var(--border)] hover:border-[var(--border-strong)]"
+                    "rounded-full border px-3 py-1 text-xs font-semibold",
+                    profile?.is_email_verified ? "sf-tone-success" : "sf-tone-warning"
                   )}
                 >
-                  {cat}
-                </button>
-              ))}
-            </div>
-          </div>
-          <FormField
-            label="Preferred Sourcing Regions"
-            id="prefRegions"
-            value={preferredRegions}
-            onChange={setPreferredRegions}
-            placeholder="e.g. Rift Valley, Central, Western"
-            hint="Comma-separated list of regions where you prefer to source from."
-          />
-          <div className="flex justify-end">
-            <button
-              onClick={handleSaveProfile} disabled={saving}
-              className="flex items-center gap-2 px-5 h-10 rounded-xl text-sm font-semibold
-                         bg-[var(--primary)] text-[var(--primary-fg)] hover:bg-[var(--primary-hover)]
-                         shadow-[var(--shadow-green)] disabled:opacity-50 transition-all duration-200"
-            >
-              Save preferences
-            </button>
-          </div>
-        </div>
-      </Section>
-
-      {/* Notifications */}
-      <Section title="Notifications" description="Manage how ShambaFlow contacts you." icon={Bell}>
-        <div className="space-y-4">
-          {[
-            { id: "emailNotifs", label: "Email Notifications (Brevo)", desc: "Tender updates, bid alerts, and system messages", value: emailNotifs, onChange: setEmailNotifs },
-            { id: "smsNotifs",   label: "SMS Notifications (Infobip)", desc: "Critical alerts and OTP codes via SMS", value: smsNotifs, onChange: setSmsNotifs },
-          ].map((pref) => (
-            <div key={pref.id} className="flex items-start justify-between gap-4">
-              <div>
-                <p className="text-sm font-medium text-[var(--foreground)]">{pref.label}</p>
-                <p className="text-xs text-[var(--foreground-muted)] mt-0.5">{pref.desc}</p>
+                  {profile?.is_email_verified ? "Email verified" : "Email pending"}
+                </Badge>
+                <Badge
+                  className={cn(
+                    "rounded-full border px-3 py-1 text-xs font-semibold",
+                    profile?.profile?.is_verified ? "sf-tone-info" : "sf-tone-warning"
+                  )}
+                >
+                  {profile?.profile?.is_verified ? "Buyer verified" : "Buyer review pending"}
+                </Badge>
               </div>
-              <button
-                onClick={() => pref.onChange(!pref.value)}
-                className={cn(
-                  "relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors duration-200",
-                  pref.value ? "bg-[var(--primary)]" : "bg-[var(--border-strong)]"
-                )}
-                role="switch" aria-checked={pref.value}
-              >
-                <span className={cn(
-                  "inline-block w-4 h-4 transform rounded-full bg-white shadow-sm transition-transform duration-200",
-                  pref.value ? "translate-x-6" : "translate-x-1"
-                )} />
-              </button>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={logoSaving}
+                  className="rounded-2xl bg-[var(--surface)] text-[var(--foreground)] hover:bg-[var(--background-muted)]"
+                >
+                  {logoSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Camera className="h-4 w-4" />}
+                  Upload logo
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={handleRemoveLogo}
+                  disabled={logoSaving || !profile?.profile?.company_logo}
+                  className="rounded-2xl border-white/25 bg-transparent text-white hover:bg-white/10"
+                >
+                  <Trash2 className="h-4 w-4" />
+                  Remove logo
+                </Button>
+                <Button
+                  asChild
+                  variant="outline"
+                  className="rounded-2xl border-white/25 bg-transparent text-white hover:bg-white/10"
+                >
+                  <Link href="/marketplace/settings">
+                    <ShieldCheck className="h-4 w-4" />
+                    Open settings
+                  </Link>
+                </Button>
+              </div>
             </div>
-          ))}
-          <div className="flex justify-end">
-            <button
-              onClick={handleSaveNotifs} disabled={saving}
-              className="flex items-center gap-2 px-5 h-10 rounded-xl text-sm font-semibold
-                         bg-[var(--primary)] text-[var(--primary-fg)] hover:bg-[var(--primary-hover)]
-                         shadow-[var(--shadow-green)] disabled:opacity-50 transition-all duration-200"
-            >
-              Save preferences
-            </button>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-3 lg:min-w-[360px]">
+            {[
+              { label: "Active tenders", value: String(profile?.profile?.total_tenders ?? 0) },
+              { label: "Average rating", value: formatDecimal(Number(profile?.profile?.average_rating ?? 0)) },
+              { label: "Primary region", value: profile?.profile?.region || "Not set" },
+            ].map((item) => (
+              <div key={item.label} className="sf-hero-panel rounded-2xl px-4 py-4">
+                <p className="text-[11px] uppercase tracking-[0.18em] text-white/65">{item.label}</p>
+                <p className="mt-2 text-lg font-semibold text-white">{item.value}</p>
+              </div>
+            ))}
           </div>
         </div>
-      </Section>
+      </section>
 
-      {/* Change Password */}
-      <Section title="Change Password" description="Keep your account secure with a strong password." icon={Shield}>
-        <form onSubmit={handleChangePassword} className="space-y-4" noValidate>
-          <AnimatedAlert
-            show={Boolean(pwdError)}
-            motionKey={pwdError ?? "pwd-error"}
-            className="flex items-center gap-2 p-3 rounded-lg bg-[var(--destructive-light)] border border-red-200 dark:border-red-900/40 text-sm text-[var(--destructive)]"
+      <AnimatedAlert
+        show={Boolean(message)}
+        motionKey={message?.text ?? "buyer-profile-message"}
+        className={cn(
+          "flex items-start gap-3 rounded-2xl border px-4 py-4 text-sm",
+          message?.type === "success" ? "sf-tone-success" : "sf-tone-danger"
+        )}
+      >
+        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
+        <p>{message?.text ?? ""}</p>
+      </AnimatedAlert>
+
+      <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
+        <div className="space-y-6">
+          <Section
+            title="Company identity"
+            description="Keep the operational and registration details cooperatives depend on before responding."
+            icon={Building2}
           >
-            <AlertCircle className="w-4 h-4 shrink-0" />
-            {pwdError ?? ""}
-          </AnimatedAlert>
-          {[
-            { id: "curPwd", label: "Current Password",     value: currentPwd, onChange: setCurrentPwd, autoComplete: "current-password" },
-            { id: "newPwd", label: "New Password",          value: newPwd,     onChange: setNewPwd,     autoComplete: "new-password" },
-            { id: "cfmPwd", label: "Confirm New Password",  value: cfmPwd,     onChange: setCfmPwd,     autoComplete: "new-password" },
-          ].map((f) => (
-            <div key={f.id} className="space-y-1.5">
-              <label htmlFor={f.id} className="block text-sm font-medium text-[var(--foreground)]">{f.label}</label>
-              <div className="relative">
-                <input
-                  id={f.id} type={showPwd ? "text" : "password"} value={f.value}
-                  onChange={(e) => f.onChange(e.target.value)} autoComplete={f.autoComplete} placeholder="••••••••"
-                  className="w-full h-11 px-4 pr-11 rounded-xl border text-sm bg-[var(--input-bg)] text-[var(--input-text)]
-                             border-[var(--input-border)] focus:border-[var(--input-border-focus)]
-                             focus:ring-2 focus:ring-[var(--border-focus)] focus:outline-none"
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="space-y-1.5">
+                <FieldLabel>Company name</FieldLabel>
+                <Input
+                  value={companyName}
+                  onChange={(event) => setCompanyName(event.target.value)}
+                  className="h-11 rounded-2xl"
                 />
-                <button type="button" onClick={() => setShowPwd(!showPwd)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--foreground-subtle)] hover:text-[var(--foreground-muted)] transition-colors">
-                  {showPwd ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                </button>
-              </div>
+              </label>
+              <label className="space-y-1.5">
+                <FieldLabel>Buyer category</FieldLabel>
+                <Select value={buyerType} onValueChange={setBuyerType}>
+                  <SelectTrigger className="h-11 w-full rounded-2xl border-[var(--input-border)] bg-[var(--input-bg)] px-4 text-sm text-[var(--input-text)]">
+                    <SelectValue placeholder="Select buyer category" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {BUYER_TYPES.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </label>
+              <label className="space-y-1.5">
+                <FieldLabel>Email address</FieldLabel>
+                <div className="relative">
+                  <Mail className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--foreground-subtle)]" />
+                  <Input
+                    disabled
+                    value={profile?.email ?? ""}
+                    className="h-11 rounded-2xl bg-[var(--background-muted)] pl-10 text-[var(--foreground-muted)]"
+                  />
+                </div>
+              </label>
+              <label className="space-y-1.5">
+                <FieldLabel>Country</FieldLabel>
+                <Input
+                  value={country}
+                  onChange={(event) => setCountry(event.target.value)}
+                  className="h-11 rounded-2xl"
+                />
+              </label>
+              <label className="space-y-1.5">
+                <FieldLabel>Registration number</FieldLabel>
+                <Input
+                  value={registrationNumber}
+                  onChange={(event) => setRegistrationNumber(event.target.value)}
+                  className="h-11 rounded-2xl"
+                />
+              </label>
+              <label className="space-y-1.5">
+                <FieldLabel>Tax ID / PIN</FieldLabel>
+                <Input
+                  value={taxPin}
+                  onChange={(event) => setTaxPin(event.target.value)}
+                  className="h-11 rounded-2xl"
+                />
+              </label>
+              <label className="space-y-1.5">
+                <FieldLabel>Region</FieldLabel>
+                <div className="relative">
+                  <MapPin className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--foreground-subtle)]" />
+                  <Input
+                    value={region}
+                    onChange={(event) => setRegion(event.target.value)}
+                    className="h-11 rounded-2xl pl-10"
+                  />
+                </div>
+              </label>
+              <label className="space-y-1.5">
+                <FieldLabel>Website</FieldLabel>
+                <div className="relative">
+                  <Globe className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--foreground-subtle)]" />
+                  <Input
+                    value={website}
+                    onChange={(event) => setWebsite(event.target.value)}
+                    className="h-11 rounded-2xl pl-10"
+                  />
+                </div>
+              </label>
+              <label className="space-y-1.5 sm:col-span-2">
+                <FieldLabel>Physical address</FieldLabel>
+                <Input
+                  value={physicalAddress}
+                  onChange={(event) => setPhysicalAddress(event.target.value)}
+                  className="h-11 rounded-2xl"
+                />
+              </label>
             </div>
-          ))}
-          <div className="flex justify-end">
-            <button type="submit" disabled={pwdLoading || !currentPwd || !newPwd || !cfmPwd}
-              className="flex items-center gap-2 px-5 h-10 rounded-xl text-sm font-semibold
-                         bg-[var(--primary)] text-[var(--primary-fg)] hover:bg-[var(--primary-hover)]
-                         shadow-[var(--shadow-green)] disabled:opacity-50 transition-all duration-200">
-              {pwdLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
-              Update password
-            </button>
-          </div>
-        </form>
-      </Section>
+          </Section>
 
-      <Toast toast={toast} onClose={closeToast} />
+          <Section
+            title="Buyer story"
+            description="Give cooperatives the sourcing context that sits behind the tenders you publish."
+            icon={Sparkles}
+          >
+            <Textarea
+              rows={7}
+              value={description}
+              onChange={(event) => setDescription(event.target.value)}
+              placeholder="Explain your sourcing model, quality standards, turnaround expectations, and the kind of cooperative capacity you are looking for."
+              className="rounded-2xl px-4 py-3 text-sm leading-6"
+            />
+          </Section>
+        </div>
+
+        <div className="space-y-6">
+          <Section
+            title="Sourcing preferences"
+            description="Tune the categories and regions that shape what you see and how cooperatives interpret your tenders."
+            icon={Tag}
+          >
+            <div className="space-y-5">
+              <div>
+                <p className="mb-2 text-sm font-medium text-[var(--foreground)]">Interested categories</p>
+                <div className="flex flex-wrap gap-2">
+                  {CATEGORY_OPTIONS.map((option) => (
+                    <Button
+                      key={option.value}
+                      type="button"
+                      size="sm"
+                      variant={categories.includes(option.value) ? "default" : "outline"}
+                      onClick={() => toggleCategory(option.value)}
+                      className="rounded-full"
+                    >
+                      {option.label}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+              <label className="space-y-1.5">
+                <FieldLabel>Preferred regions</FieldLabel>
+                <Textarea
+                  rows={4}
+                  value={preferredRegions}
+                  onChange={(event) => setPreferredRegions(event.target.value)}
+                  placeholder="Nairobi County, Nakuru County, Uasin Gishu County"
+                  className="rounded-2xl px-4 py-3 text-sm"
+                />
+              </label>
+            </div>
+          </Section>
+
+          <Card className="rounded-[24px] border border-[var(--border)] bg-[var(--surface)] py-0 shadow-[var(--shadow-sm)]">
+            <CardContent className="p-6">
+              <h2 className="text-lg font-semibold text-[var(--foreground)]">Profile actions</h2>
+              <p className="mt-2 text-sm text-[var(--foreground-muted)]">
+                Changes here update the buyer-facing identity used across your marketplace workspace.
+              </p>
+              <div className="mt-6 flex flex-col gap-3">
+                <Button
+                  type="button"
+                  onClick={handleSaveProfile}
+                  disabled={saving}
+                  className="h-11 rounded-2xl"
+                >
+                  {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                  Save buyer profile
+                </Button>
+                <Button
+                  asChild
+                  type="button"
+                  variant="outline"
+                  className="h-11 rounded-2xl"
+                >
+                  <Link href="/marketplace/onboarding">
+                    Review onboarding checklist
+                  </Link>
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
     </div>
   );
 }

@@ -115,7 +115,7 @@ def register_cooperative(data: dict) -> dict:
 
 @transaction.atomic
 def register_buyer(data: dict) -> dict:
-    from core.models import BuyerProfile
+    from core.models import Buyer, BuyerProfile
 
     email = data['email'].lower().strip()
     phone = data.get('phone', '').strip()
@@ -147,6 +147,7 @@ def register_buyer(data: dict) -> dict:
         company_name=data.get('company_name', ''),
         buyer_type=data.get('buyer_type', 'TRADER'),
     )
+    Buyer.objects.create(user=user, profile=user.buyer_profile)
 
     if verification_method != 'sms' or not phone:
         verification_method = 'email'

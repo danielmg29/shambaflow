@@ -7,17 +7,34 @@ Configured for: Neon PostgreSQL | Upstash Redis | Brevo Email | Infobip SMS
 import os
 from pathlib import Path
 from datetime import timedelta
-import os
-from dotenv import load_dotenv
+from decimal import Decimal
 from urllib.parse import urlparse, parse_qsl
+
 import environ
+from dotenv import load_dotenv
 
 
-load_dotenv()
 # ─────────────────────────────────────────
 # PATH & ENVIRONMENT BOOTSTRAP
 # ─────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+
+def _bootstrap_environment() -> None:
+    env_file = BASE_DIR / '.env'
+    root_env_file = BASE_DIR.parent / '.env'
+    selected_env_file = env_file if env_file.exists() else root_env_file
+
+    if not selected_env_file.exists():
+        return
+
+    # Prefer the repo .env over stale exported shell values so local config
+    # changes are applied consistently after a Django restart.
+    load_dotenv(selected_env_file, override=True)
+    environ.Env.read_env(selected_env_file, overwrite=True)
+
+
+_bootstrap_environment()
 
 env = environ.Env(
     DJANGO_DEBUG=(bool, False),
@@ -25,10 +42,6 @@ env = environ.Env(
     DJANGO_ALLOWED_HOSTS=(list, ['localhost', '127.0.0.1']),
     DJANGO_CORS_ALLOWED_ORIGINS=(list, ['http://localhost:3000']),
 )
-
-env_file = BASE_DIR / '.env'
-root_env_file = BASE_DIR.parent / '.env'
-environ.Env.read_env(env_file if env_file.exists() else root_env_file)
 
 
 def unfold_brand_styles(request):
@@ -54,6 +67,7 @@ FRONTEND_URL = env('FRONTEND_URL', default='http://localhost:3000')
 # INSTALLED APPS
 # ─────────────────────────────────────────
 DJANGO_APPS = [
+    "daphne",  # must come first so runserver serves ASGI + websockets
     "unfold",  # before django.contrib.admin
     "unfold.contrib.filters",  # optional, if special filters are needed
     "unfold.contrib.forms",  # optional, if special form elements are needed
@@ -209,19 +223,12 @@ DATABASES = {
 # }
 
 # Allow DATABASE_URL override (used in Docker / CI)
-# Add these at the top of your settings.py
-import os
-from dotenv import load_dotenv
-from urllib.parse import urlparse, parse_qsl
-
-load_dotenv()
-
-# Replace the DATABASES section of your settings.py with this
 tmpPostgres = urlparse(os.getenv("DATABASE_URL"))
 
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
+        
         'NAME': tmpPostgres.path.replace('/', ''),
         'USER': tmpPostgres.username,
         'PASSWORD': tmpPostgres.password,
@@ -273,18 +280,31 @@ SESSION_ENGINE = 'django.contrib.sessions.backends.db'
 
 # ─────────────────────────────────────────
 # DJANGO CHANNELS — WebSocket via Redis
-# Disabled for development - enable in production with Redis
+# In-memory by default for development, Redis-backed when explicitly configured
 # ─────────────────────────────────────────
-# CHANNEL_LAYERS = {
-#     'default': {
-#         'BACKEND': 'channels_redis.core.RedisChannelLayer',
-#         'CONFIG': {
-#             'hosts': [REDIS_URL],
-#             'capacity': 1500,
-#             'expiry': 10,
-#         },
-#     },
-# }
+USE_REDIS_CHANNEL_LAYER = (
+    not DEBUG
+    and bool(REDIS_URL)
+    and REDIS_URL.startswith(("redis://", "rediss://"))
+)
+
+if USE_REDIS_CHANNEL_LAYER:
+    CHANNEL_LAYERS = {
+        'default': {
+            'BACKEND': 'channels_redis.core.RedisChannelLayer',
+            'CONFIG': {
+                'hosts': [REDIS_URL],
+                'capacity': 1500,
+                'expiry': 10,
+            },
+        },
+    }
+else:
+    CHANNEL_LAYERS = {
+        'default': {
+            'BACKEND': 'channels.layers.InMemoryChannelLayer',
+        },
+    }
 # Disable Django's automatic slash-append redirect.
 # All API endpoints explicitly declare trailing slashes in urls.py.
 # Without this, POST requests to a URL missing a trailing slash cause a 500
@@ -387,13 +407,14 @@ CORS_ALLOW_HEADERS = [
 BREVO_API_KEY = env('BREVO_API_KEY', default='')
 BREVO_SENDER_EMAIL = env('BREVO_SENDER_EMAIL', default='noreply@shambaflow.com')
 BREVO_SENDER_NAME = env('BREVO_SENDER_NAME', default='ShambaFlow')
+BREVO_SMTP_LOGIN = env('BREVO_SMTP_LOGIN', default='') or BREVO_SENDER_EMAIL
 
 # Django email backend — routes through Brevo SMTP
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST = 'smtp-relay.brevo.com'
 EMAIL_PORT = 587
 EMAIL_USE_TLS = True
-EMAIL_HOST_USER = env('BREVO_SENDER_EMAIL', default='')
+EMAIL_HOST_USER = BREVO_SMTP_LOGIN
 EMAIL_HOST_PASSWORD = env('BREVO_SMTP_KEY', default='')    # Brevo SMTP key (different from API key)
 DEFAULT_FROM_EMAIL = f"{BREVO_SENDER_NAME} <{BREVO_SENDER_EMAIL}>"
 SERVER_EMAIL = BREVO_SENDER_EMAIL
@@ -405,6 +426,19 @@ SERVER_EMAIL = BREVO_SENDER_EMAIL
 INFOBIP_API_KEY = env('INFOBIP_API_KEY', default='')
 INFOBIP_BASE_URL = env('INFOBIP_BASE_URL', default='https://api.infobip.com')
 INFOBIP_SENDER_ID = env('INFOBIP_SENDER_ID', default='ShambaFlow')
+
+# ─────────────────────────────────────────
+# PAYMENTS — SellaPay
+# https://pay.sellapay.africa
+# ─────────────────────────────────────────
+SELLAPAY_API_KEY = env('SELLAPAY_API_KEY', default='')
+SELLAPAY_API_SECRET = env('SELLAPAY_API_SECRET', default='')
+SELLAPAY_BASE_URL = env('SELLAPAY_BASE_URL', default='https://pay.sellapay.africa/api/v1')
+SELLAPAY_TIMEOUT_SECONDS = env.int('SELLAPAY_TIMEOUT_SECONDS', default=20)
+TENDER_MARKETPLACE_ACCESS_PRICE_KES = Decimal(
+    env('TENDER_MARKETPLACE_ACCESS_PRICE_KES', default='1')
+)
+TENDER_MARKETPLACE_ACCESS_DAYS = env.int('TENDER_MARKETPLACE_ACCESS_DAYS', default=30)
 
 # ─────────────────────────────────────────
 # STATIC & MEDIA FILES
@@ -563,6 +597,7 @@ UNFOLD = {
                     {'title': 'Buyers', 'icon': 'business', 'link': '/admin/core/buyer/'},
                     {'title': 'Tenders', 'icon': 'assignment', 'link': '/admin/core/tender/'},
                     {'title': 'Bids', 'icon': 'gavel', 'link': '/admin/core/bid/'},
+                    {'title': 'Marketplace Banners', 'icon': 'campaign', 'link': '/admin/core/tendermarketplacebanner/'},
                 ],
             },
             {
@@ -676,10 +711,11 @@ LOGGING = {
             'formatter': 'verbose',
         },
         'file': {
-            'class': 'logging.handlers.RotatingFileHandler',
+            'class': 'core.logging_handlers.SafeRotatingFileHandler',
             'filename': BASE_DIR / 'logs' / 'shambaflow.log',
             'maxBytes': 1024 * 1024 * 5,   # 5MB
             'backupCount': 5,
+            'rollover_cooldown': 30,
             'formatter': 'verbose',
         },
     },

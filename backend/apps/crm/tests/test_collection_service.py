@@ -293,6 +293,85 @@ class CollectionServiceEditDeleteTests(TestCase):
             [field["label"] for field in production_metadata["filter_fields"]],
         )
 
+    def test_member_dashboard_payload_calculates_member_waste_from_production_data(self):
+        for field_key, label in (
+            ("quantity_kg", "Harvest Quantity (kg)"),
+            ("marketable_kg", "Marketable Quantity (kg)"),
+        ):
+            DynamicFieldDefinition.objects.create(
+                cooperative=self.cooperative,
+                target_model="PRODUCTION",
+                field_key=field_key,
+                label=label,
+                display_type="number",
+                tag="CAPACITY",
+                created_by=self.chair,
+            )
+
+        save_record(
+            self.cooperative,
+            self.chair,
+            "production",
+            {
+                "record_date": "2026-03-20",
+                "collection_scope": "MEMBER",
+                "member_number": self.member.member_number,
+                "quantity_kg": 1200,
+                "marketable_kg": 1080,
+            },
+        )
+
+        payload = get_member_dashboard_payload(self.cooperative, self.member, self.chair)
+
+        self.assertEqual(payload["analytics"]["production"]["waste_kg"], 120.0)
+        self.assertEqual(payload["analytics"]["production"]["waste_rate"], 10.0)
+        self.assertEqual(payload["analytics"]["production"]["records_with_waste"], 1)
+
+    def test_cooperative_dashboard_payload_calculates_collective_waste(self):
+        for field_key, label in (
+            ("quantity_kg", "Harvest Quantity (kg)"),
+            ("marketable_kg", "Marketable Quantity (kg)"),
+            ("rejected_kg", "Rejected Quantity (kg)"),
+        ):
+            DynamicFieldDefinition.objects.create(
+                cooperative=self.cooperative,
+                target_model="PRODUCTION",
+                field_key=field_key,
+                label=label,
+                display_type="number",
+                tag="CAPACITY",
+                created_by=self.chair,
+            )
+
+        save_record(
+            self.cooperative,
+            self.chair,
+            "production",
+            {
+                "record_date": "2026-03-20",
+                "collection_scope": "MEMBER",
+                "member_number": self.member.member_number,
+                "quantity_kg": 1200,
+                "marketable_kg": 1080,
+            },
+        )
+        save_record(
+            self.cooperative,
+            self.chair,
+            "production",
+            {
+                "record_date": "2026-03-28",
+                "collection_scope": "COOPERATIVE",
+                "quantity_kg": 500,
+                "rejected_kg": 50,
+            },
+        )
+
+        payload = get_cooperative_dashboard_payload(self.cooperative, self.chair)
+
+        self.assertEqual(payload["waste_volume_kg"], 170.0)
+        self.assertEqual(payload["waste_rate"], 10.0)
+
     def test_member_dashboard_recent_activity_uses_dynamic_template_title_and_date_fields(self):
         DynamicFieldDefinition.objects.create(
             cooperative=self.cooperative,
@@ -483,6 +562,9 @@ class CollectionServiceEditDeleteTests(TestCase):
         self.assertTrue(
             any(item["member"] == "Alice Farmer" for item in payload["recent_submissions"])
         )
+        self.assertEqual(payload["stat_cards"][0]["id"], "members")
+        self.assertEqual(payload["stat_cards"][2]["id"], "capacity_index")
+        self.assertTrue(payload["stat_cards"][2]["trend_value"])
 
     def test_submissions_workspace_returns_widgets_and_paginated_rows(self):
         save_record(

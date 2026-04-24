@@ -14,7 +14,7 @@ import { useState, useCallback } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Eye, EyeOff, Loader2, AlertCircle, Sprout, Building2 } from "lucide-react";
-import { authApi, saveTokens, saveUser, ApiError } from "@/lib/api";
+import { authApi, saveTokens, saveUser, apiFetch, ApiError, type UserSnapshot } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { AnimatedAlert } from "@/components/ui/animated-alert";
 
@@ -31,6 +31,29 @@ export default function LoginPage() {
   const [error, setError]           = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
+  const resolvePostLoginDestination = useCallback(async (user: UserSnapshot) => {
+    const { user_type, must_change_password, cooperative_id } = user;
+
+    if (must_change_password) {
+      return "/change-password?required=1";
+    }
+
+    if (user_type === "CHAIR" || user_type === "HELPER") {
+      return cooperative_id ? `/crm/${cooperative_id}/dashboard` : "/crm/dashboard";
+    }
+
+    if (user_type === "BUYER") {
+      try {
+        const onboarding = await apiFetch<{ is_complete: boolean }>("/api/marketplace/onboarding/");
+        return onboarding.is_complete ? "/marketplace/dashboard" : "/marketplace/onboarding";
+      } catch {
+        return "/marketplace/dashboard";
+      }
+    }
+
+    return "/";
+  }, []);
+
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
@@ -42,22 +65,8 @@ export default function LoginPage() {
         const data = await authApi.login(email.trim(), password);
         saveTokens(data.access, data.refresh);
         saveUser(data.user);
-
-        // Route based on user type
-        const { user_type, must_change_password, cooperative_id } = data.user;
-
-        if (must_change_password) {
-          router.push("/change-password?required=1");
-          return;
-        }
-
-        if (user_type === "CHAIR" || user_type === "HELPER") {
-          router.push(cooperative_id ? `/crm/${cooperative_id}/dashboard` : "/crm/dashboard");
-        } else if (user_type === "BUYER") {
-          router.push("/marketplace/dashboard");
-        } else {
-          router.push("/");
-        }
+        const destination = await resolvePostLoginDestination(data.user);
+        router.replace(destination);
       } catch (err) {
         if (err instanceof ApiError) {
           setError(err.message);
@@ -65,10 +74,11 @@ export default function LoginPage() {
         } else {
           setError("Login failed. Please check your connection and try again.");
         }
+      } finally {
         setLoading(false);
       }
     },
-    [email, password, router]
+    [email, password, resolvePostLoginDestination, router]
   );
 
   return (

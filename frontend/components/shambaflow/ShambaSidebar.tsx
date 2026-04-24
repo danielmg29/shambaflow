@@ -20,20 +20,14 @@ import {
   LayoutDashboard,
   Users,
   ClipboardList,
-  FileText,
-  BarChart3,
   Briefcase,
   Settings,
-  CreditCard,
   ShieldCheck,
   Building2,
   Leaf,
   Heart,
   Gavel,
   Wallet,
-  PlusCircle,
-  Search,
-  Star,
   ChevronLeft,
   ChevronRight,
   X,
@@ -80,16 +74,11 @@ const CRM_NAV: SidebarItem[] = [
 ];
 
 const TENDER_NAV: SidebarItem[] = [
-  { id: "dashboard",     label: "Dashboard",         icon: LayoutDashboard, href: "/tender" },
-  { id: "create-tender", label: "Create Tender",     icon: PlusCircle,      href: "/tender/create" },
-  { id: "my-tenders",   label: "My Tenders",         icon: Briefcase,       href: "/tender/my-tenders" },
-  { id: "browse",       label: "Browse Cooperatives",icon: Search,          href: "/tender/cooperatives" },
-  { id: "bids",         label: "Bids Received",      icon: FileText,        href: "/tender/bids" },
-  { id: "shortlisted",  label: "Shortlisted",        icon: Star,            href: "/tender/shortlisted" },
-  { id: "history",      label: "Trade History",      icon: BarChart3,       href: "/tender/history" },
-  { id: "profile",      label: "Buyer Profile",      icon: Building2,       href: "/tender/profile" },
-  { id: "billing",      label: "Billing",            icon: CreditCard,      href: "/tender/billing" },
-  { id: "settings",     label: "Settings",           icon: Settings,        href: "/tender/settings" },
+  { id: "dashboard",  label: "Dashboard",      icon: LayoutDashboard, href: "/marketplace/dashboard" },
+  { id: "onboarding", label: "Onboarding",     icon: ClipboardList,   href: "/marketplace/onboarding" },
+  { id: "tenders",    label: "Tenders",        icon: Briefcase,       href: "/marketplace/tenders" },
+  { id: "profile",    label: "Buyer Profile",  icon: Building2,       href: "/marketplace/profile" },
+  { id: "settings",   label: "Settings",       icon: Settings,        href: "/marketplace/settings" },
 ];
 
 /* ─── Sidebar Item ────────────────────────────────────────────────── */

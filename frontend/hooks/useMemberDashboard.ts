@@ -29,6 +29,9 @@ export interface MemberAnalytics {
     total_records: number;
     latest_date: string | null;
     seasons: string[];
+    waste_kg: number;
+    waste_rate: number;
+    records_with_waste: number;
   };
   livestock: {
     total_events: number;

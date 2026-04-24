@@ -15,6 +15,7 @@ from django.utils import timezone
 
 from core.models import Cooperative, Notification, NotificationPreference, User
 from core.services.brevo_email import (
+    send_buyer_verification_email,
     send_cooperative_verification_email,
     send_invitation_email,
     send_password_reset_email,
@@ -219,8 +220,7 @@ class NotificationDispatcher:
             return False
 
         try:
-            sender(**kwargs)
-            return True
+            return bool(sender(**kwargs))
         except Exception:
             logger.exception("Email notification failed | to=%s", kwargs.get("to_email"))
             return False
@@ -246,8 +246,7 @@ class NotificationDispatcher:
             return False
 
         try:
-            sender(**kwargs)
-            return True
+            return bool(sender(**kwargs))
         except Exception:
             logger.exception("SMS notification failed | to=%s", kwargs.get("phone_number") or kwargs.get("to_phone"))
             return False
@@ -335,10 +334,12 @@ class NotificationDispatcher:
             user=recipient_user,
             cooperative=None,
             preference_field=None,
-            sender=send_cooperative_verification_email,
+            sender=send_buyer_verification_email,
             to_email=email,
-            cooperative_name="ShambaFlow",
-            chair_name=buyer_name,
+            buyer_name=buyer_name,
+            company_name=(cls._related(recipient_user, "buyer_profile").company_name
+                          if recipient_user and cls._related(recipient_user, "buyer_profile")
+                          else "ShambaFlow Buyer"),
             verification_token=verification_token,
         ):
             channels.append(cls.EMAIL)
@@ -352,7 +353,7 @@ class NotificationDispatcher:
             category=Notification.Category.ACCOUNT,
             event_type="buyer_account_created",
             priority=Notification.Priority.HIGH,
-            action_url="/marketplace/dashboard",
+            action_url="/marketplace/onboarding",
             data={"verification_method": verification_method},
             delivery_channels=channels,
         )

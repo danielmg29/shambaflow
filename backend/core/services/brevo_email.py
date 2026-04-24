@@ -25,6 +25,12 @@ def _get_brevo_client():
     )
 
 
+def _looks_like_brevo_smtp_login(address: str | None) -> bool:
+    if not address:
+        return False
+    return address.strip().lower().endswith("@smtp-brevo.com")
+
+
 # ─────────────────────────────────────────
 # CORE SEND FUNCTION
 # ─────────────────────────────────────────
@@ -50,6 +56,16 @@ def send_email(
     Returns:
         True on success, False on failure.
     """
+    if _looks_like_brevo_smtp_login(settings.BREVO_SENDER_EMAIL):
+        logger.error(
+            "Brevo sender misconfigured: BREVO_SENDER_EMAIL=%s looks like the SMTP login. "
+            "Use a verified sender address from your own authenticated domain instead, "
+            "and keep the SMTP login in BREVO_SMTP_LOGIN. "
+            "If you recently changed backend/.env, restart the Django process so the new settings are loaded.",
+            settings.BREVO_SENDER_EMAIL,
+        )
+        return False
+
     try:
         api_instance = _get_brevo_client()
 
@@ -128,6 +144,61 @@ def send_cooperative_verification_email(
         to_email=to_email,
         to_name=f"{chair_name} ({cooperative_name})",
         subject=f"Verify your ShambaFlow account — {cooperative_name}",
+        html_content=html,
+    )
+
+
+def send_buyer_verification_email(
+    to_email: str,
+    buyer_name: str,
+    company_name: str,
+    verification_token: str,
+) -> bool:
+    """
+    Sent when a buyer self-registers and needs to verify their email address.
+    """
+    verification_url = (
+        f"{settings.FRONTEND_URL}/verify-email?token={verification_token}"
+    )
+    html = f"""
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <div style="background: #16423c; padding: 24px; text-align: center;">
+            <h1 style="color: #f4efe6; margin: 0;">ShambaFlow</h1>
+        </div>
+        <div style="padding: 32px; background: #ffffff;">
+            <h2 style="color: #16423c;">Welcome, {buyer_name}!</h2>
+            <p>
+                Your buyer account for <strong>{company_name}</strong> has been created on ShambaFlow.
+            </p>
+            <p>
+                Verify your email address to finish onboarding and start publishing structured tenders.
+            </p>
+            <div style="text-align: center; margin: 32px 0;">
+                <a href="{verification_url}"
+                   style="background: #1f6f5f; color: white; padding: 14px 32px;
+                          text-decoration: none; border-radius: 6px; font-weight: bold;">
+                    Verify Buyer Account
+                </a>
+            </div>
+            <div style="background: #f4f7f2; border-radius: 8px; padding: 16px; margin: 24px 0;">
+                <p style="margin: 0 0 8px 0; font-weight: bold; color: #16423c;">What happens next?</p>
+                <p style="margin: 0; color: #4a5565;">
+                    Complete your buyer onboarding, add sourcing preferences, and publish your first tender.
+                </p>
+            </div>
+            <p style="color: #666; font-size: 14px;">
+                This link expires in 72 hours. If you did not create this account, please ignore this email.
+            </p>
+        </div>
+        <div style="padding: 16px; text-align: center; background: #f5f5f5; color: #999; font-size: 12px;">
+            © ShambaFlow — Digital Infrastructure for Organised Agricultural Supply
+        </div>
+    </div>
+    """
+    return send_email(
+        to_email=to_email,
+        to_name=f"{buyer_name} ({company_name})",
+        subject=f"Verify your ShambaFlow buyer account — {company_name}",
         html_content=html,
     )
 

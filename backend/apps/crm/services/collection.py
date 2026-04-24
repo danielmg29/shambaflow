@@ -34,6 +34,7 @@ from django.conf import settings
 from django.core.paginator import Paginator
 from django.db import models
 from django.http import HttpResponse
+from django.utils import timezone
 
 from core.models import (
     CapacitySnapshot,
@@ -105,6 +106,54 @@ MODEL_CATEGORICAL_HINTS: dict[str, tuple[str, ...]] = {
 }
 
 GENERIC_NUMERIC_HINTS = ("amount", "value", "quantity", "count", "size", "total")
+PRODUCTION_WASTE_HINTS = (
+    "waste",
+    "wastage",
+    "loss",
+    "lost",
+    "reject",
+    "rejected",
+    "spoil",
+    "spoilage",
+    "discard",
+    "damage",
+    "damaged",
+    "shrink",
+)
+PRODUCTION_TOTAL_OUTPUT_HINTS = (
+    "quantity",
+    "volume",
+    "yield",
+    "harvest",
+    "produced",
+    "production",
+    "collected",
+    "gross",
+    "output",
+    "processed",
+)
+PRODUCTION_USABLE_OUTPUT_HINTS = (
+    "marketable",
+    "usable",
+    "accepted",
+    "good",
+    "net",
+    "delivered",
+    "sold",
+    "graded",
+)
+PRODUCTION_NON_VOLUME_HINTS = (
+    "price",
+    "cost",
+    "value",
+    "amount",
+    "rate",
+    "percent",
+    "percentage",
+    "acre",
+    "hectare",
+    "score",
+)
 COOPERATIVE_DASHBOARD_RECENT_LIMIT = 4
 COOPERATIVE_DASHBOARD_LABELS = {
     "members": "Member Record",
@@ -630,6 +679,8 @@ def _prepare_dynamic_extra_data(
             continue
         if key in registry:
             incoming_dynamic[key] = _coerce_custom_value(value, registry[key]["display_type"])
+            continue
+        incoming_dynamic[key] = value
 
     merged = dict(existing_extra_data or {})
     merged.update(incoming_dynamic)
@@ -1192,6 +1243,110 @@ def _field_value_label(
     if not normalized:
         return "Unknown"
     return choice_labels.get(field_key, {}).get(normalized, _humanize_value(normalized))
+
+
+def _record_numeric_fields(record: dict[str, Any]) -> dict[str, float]:
+    numeric_fields: dict[str, float] = {}
+
+    for key, value in record.items():
+        if key in {"id", "cooperative_id", "created_at", "updated_at", "extra_data"}:
+            continue
+        parsed = _parse_numeric(value)
+        if parsed is not None:
+            numeric_fields[key] = parsed
+
+    for key, value in (record.get("extra_data") or {}).items():
+        parsed = _parse_numeric(value)
+        if parsed is not None:
+            numeric_fields[key] = parsed
+
+    return numeric_fields
+
+
+def _field_hint_text(field_key: str, field_lookup: dict[str, dict[str, Any]]) -> str:
+    label = field_lookup.get(field_key, {}).get("label", "")
+    return f"{field_key} {label}".replace("-", " ").lower()
+
+
+def _matches_any_hint(text: str, hints: tuple[str, ...]) -> bool:
+    return any(hint in text for hint in hints)
+
+
+def _production_waste_metrics(
+    cooperative: Cooperative,
+    records: list[dict[str, Any]],
+) -> dict[str, float | int]:
+    if not records:
+        return {
+            "waste_kg": 0.0,
+            "waste_rate": 0.0,
+            "records_with_waste": 0,
+            "total_output_kg": 0.0,
+        }
+
+    schema = build_schema(str(cooperative.id), "production")
+    field_lookup = {
+        field["field_key"]: field
+        for field in schema.get("all_fields", [])
+    }
+
+    total_output = 0.0
+    total_waste = 0.0
+    records_with_waste = 0
+
+    for record in records:
+        numeric_fields = _record_numeric_fields(record)
+        if not numeric_fields:
+            continue
+
+        explicit_waste_values: list[float] = []
+        total_candidates: list[float] = []
+        usable_candidates: list[float] = []
+
+        for field_key, value in numeric_fields.items():
+            if value < 0:
+                continue
+
+            hint_text = _field_hint_text(field_key, field_lookup)
+            if _matches_any_hint(hint_text, PRODUCTION_NON_VOLUME_HINTS):
+                continue
+
+            if _matches_any_hint(hint_text, PRODUCTION_WASTE_HINTS):
+                explicit_waste_values.append(value)
+                continue
+
+            if _matches_any_hint(hint_text, PRODUCTION_USABLE_OUTPUT_HINTS):
+                usable_candidates.append(value)
+
+            if _matches_any_hint(hint_text, PRODUCTION_TOTAL_OUTPUT_HINTS):
+                total_candidates.append(value)
+
+        record_waste = sum(explicit_waste_values)
+        record_output = max(total_candidates, default=0.0)
+
+        if record_waste <= 0 and record_output > 0 and usable_candidates:
+            best_usable = max(usable_candidates)
+            if record_output >= best_usable:
+                record_waste = record_output - best_usable
+
+        if record_output <= 0 and usable_candidates and record_waste > 0:
+            record_output = max(usable_candidates) + record_waste
+
+        if record_output > 0:
+            total_output += record_output
+
+        if record_waste > 0:
+            total_waste += record_waste
+            records_with_waste += 1
+
+    waste_rate = (total_waste / total_output * 100.0) if total_output > 0 else 0.0
+
+    return {
+        "waste_kg": round(total_waste, 3),
+        "waste_rate": round(waste_rate, 1),
+        "records_with_waste": records_with_waste,
+        "total_output_kg": round(total_output, 3),
+    }
 
 
 def _month_start(value: date) -> date:
@@ -2032,6 +2187,7 @@ def get_member_analytics(
     finance_rows = visible_records("finance")
     land_rows = visible_records("land")
     herd_rows = visible_records("herds")
+    production_waste = _production_waste_metrics(cooperative, production_rows)
 
     return {
         "production": {
@@ -2047,6 +2203,9 @@ def get_member_analytics(
                     if row.get("extra_data", {}).get("season")
                 }
             ),
+            "waste_kg": production_waste["waste_kg"],
+            "waste_rate": production_waste["waste_rate"],
+            "records_with_waste": production_waste["records_with_waste"],
         },
         "livestock": {
             "total_events": len(livestock_rows),
@@ -2517,31 +2676,119 @@ def get_cooperative_dashboard_payload(cooperative: Cooperative, user: User) -> d
     except Exception:
         capacity_metric = None
 
-    return {
-        "member_count": Member.objects.filter(cooperative=cooperative).count()
-        if permissions["members"]["can_view"]
-        else 0,
-        "active_cycles": _count_active_cycles(cooperative)
+    production_rows = (
+        _analytics_records(cooperative, "production")
         if permissions["production"]["can_view"]
-        else 0,
-        "capacity_index": _dashboard_score(
-            getattr(capacity_metric, "overall_index", 0)
-        ),
-        "data_completeness": _dashboard_score(
-            getattr(capacity_metric, "data_completeness_score", 0)
-        ),
+        else []
+    )
+    production_waste = _production_waste_metrics(cooperative, production_rows)
+    member_count = (
+        Member.objects.filter(cooperative=cooperative).count()
+        if permissions["members"]["can_view"]
+        else 0
+    )
+    active_cycles = (
+        _count_active_cycles(cooperative)
+        if permissions["production"]["can_view"]
+        else 0
+    )
+    capacity_index = _dashboard_score(
+        getattr(capacity_metric, "overall_index", 0)
+    )
+    data_completeness = _dashboard_score(
+        getattr(capacity_metric, "data_completeness_score", 0)
+    )
+    recent_submissions = get_cooperative_recent_submissions(
+        cooperative,
+        permissions=permissions,
+    )
+    recent_submissions_count = len(recent_submissions)
+    recent_members_added = (
+        Member.objects.filter(
+            cooperative=cooperative,
+            created_at__gte=timezone.now() - timedelta(days=30),
+        ).count()
+        if permissions["members"]["can_view"]
+        else 0
+    )
+    premium_threshold = int(settings.SHAMBAFLOW.get("MIN_CAPACITY_INDEX_FOR_PREMIUM", 60))
+    capacity_gap = max(premium_threshold - capacity_index, 0)
+    stat_cards = [
+        {
+            "id": "members",
+            "label": "Members",
+            "value": member_count,
+            "trend": "neutral",
+            "trend_value": (
+                f"{recent_members_added} new member records added in the last 30 days"
+                if recent_members_added
+                else "No new member records added in the last 30 days"
+            ),
+            "tone": "default",
+        },
+        {
+            "id": "active_cycles",
+            "label": "Active Cycles",
+            "value": active_cycles,
+            "trend": "neutral",
+            "trend_value": (
+                f"{recent_submissions_count} recent CRM submissions captured"
+                if recent_submissions_count
+                else "No recent CRM submissions captured"
+            ),
+            "tone": "default",
+        },
+        {
+            "id": "capacity_index",
+            "label": "Capacity Index",
+            "value": f"{capacity_index}%",
+            "trend": "neutral",
+            "trend_value": (
+                "Premium-ready for tender qualification."
+                if capacity_gap == 0
+                else f"{capacity_gap} pts to premium qualification."
+            ),
+            "tone": "primary" if capacity_index >= premium_threshold else "default",
+        },
+        {
+            "id": "data_score",
+            "label": "Data Score",
+            "value": f"{data_completeness}%",
+            "trend": "neutral",
+            "trend_value": (
+                f"{recent_submissions_count} recent submissions strengthening completeness"
+                if recent_submissions_count
+                else "Collect more records to improve completeness"
+            ),
+            "tone": "default",
+        },
+        {
+            "id": "waste_tracked",
+            "label": "Waste Tracked",
+            "value": f"{production_waste['waste_kg']:,.0f} kg",
+            "trend": "neutral",
+            "trend_value": f"{production_waste['waste_rate']}% of captured production output",
+            "tone": "accent" if production_waste["waste_kg"] > 0 else "default",
+        },
+    ]
+
+    return {
+        "member_count": member_count,
+        "active_cycles": active_cycles,
+        "capacity_index": capacity_index,
+        "data_completeness": data_completeness,
         "member_engagement": _dashboard_score(
             getattr(capacity_metric, "governance_participation_score", 0)
         ),
         "production_regularity": _dashboard_score(
             getattr(capacity_metric, "production_consistency_score", 0)
         ),
+        "waste_volume_kg": production_waste["waste_kg"],
+        "waste_rate": production_waste["waste_rate"],
         "is_verified": cooperative.is_verified,
         "tender_eligible": bool(getattr(capacity_metric, "is_premium_eligible", False)),
-        "recent_submissions": get_cooperative_recent_submissions(
-            cooperative,
-            permissions=permissions,
-        ),
+        "recent_submissions": recent_submissions,
+        "stat_cards": stat_cards,
         "permissions": permissions,
     }
 

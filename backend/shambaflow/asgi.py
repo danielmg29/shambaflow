@@ -15,12 +15,13 @@ os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'shambaflow.settings')
 django_asgi_app = get_asgi_application()
 
 from core.routing import websocket_urlpatterns  # noqa: E402 — must come after environ.setdefault
+from core.auth.websocket import TokenAuthMiddleware  # noqa: E402
 
 application = ProtocolTypeRouter({
     'http': django_asgi_app,
     'websocket': AllowedHostsOriginValidator(
         AuthMiddlewareStack(
-            URLRouter(websocket_urlpatterns)
+            TokenAuthMiddleware(URLRouter(websocket_urlpatterns))
         )
     ),
 })
